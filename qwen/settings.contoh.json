@@ -1,0 +1,41 @@
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "flash-next-fp8",
+        "name": "Qwen (OpenAI-compatible)",
+        "wireApi": "chat-completions",
+        "baseUrl": "<ISI_BASE_URL>",
+        "envKey": "KJG_LLM_API_KEY",
+        "generationConfig": {
+          "contextWindowSize": 262144,
+          "timeout": 600000,
+          "maxRetries": 1,
+          "modalities": {
+            "image": true
+          },
+          "samplingParams": {
+            "max_tokens": 32768
+          }
+        }
+      }
+    ]
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "flash-next-fp8",
+    "baseUrl": "<ISI_BASE_URL>"
+  },
+  "$version": 4,
+  "memory": {
+    "enableManagedAutoMemory": false,
+    "enableManagedAutoDream": false
+  },
+  "env": {
+    "KJG_LLM_API_KEY": "<ISI_KUNCI_API>"
+  }
+}

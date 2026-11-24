@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Status line Claude Code: progres Qwen yang sedang jalan. Lokal saja — NOL token Claude.
+
+Dipanggil Claude Code (settings.json statusLine, refreshInterval) dengan JSON sesi di stdin.
+Membaca ~/.claude/qwen-logs/*.progress yang ditulis qwen-exec/qwen-saring.py.
+"""
+import glob
+import json
+import os
+import sys
+import time
+
+LOGDIR = os.path.expanduser("~/.claude/qwen-logs")
+SEKARANG = time.time()
+TAMPIL_SELESAI = 10 * 60      # hasil akhir tetap tampil 10 menit
+ABAIKAN = 3 * 3600            # progres lebih tua dari ini diabaikan
+DIAM = 30 * 60                # tanpa tulisan selama ini → mungkin mati
+
+try:
+    sesi = json.load(sys.stdin)
+except Exception:
+    sesi = {}
+cwd = (sesi.get("workspace") or {}).get("current_dir") or sesi.get("cwd") or os.getcwd()
+model = (sesi.get("model") or {}).get("display_name") or ""
+
+
+def menit(detik):
+    detik = int(max(detik, 0))
+    return f"{detik // 60}m" if detik < 3600 else f"{detik // 3600}j{detik % 3600 // 60:02d}m"
+
+
+def ringkas_tool(b):
+    # "🔧 read_file: app/Services/X.php @ ..." → "read_file X.php"
+    isi = b[2:].strip()
+    nama, _, arg = isi.partition(":")
+    arg = arg.strip().split(" @ ")[0]
+    if nama.strip() == "run_shell_command":
+        arg = arg.replace(cwd + "/", "").replace("cd " + cwd + " && ", "")
+    elif "/" in arg:
+        arg = arg.rstrip("/").split("/")[-1]
+    arg = arg[:38] + "…" if len(arg) > 39 else arg
+    return f"{nama.strip()} {arg}".strip()
+
+
+def baca(p):
+    st = os.stat(p)
+    if SEKARANG - st.st_mtime > ABAIKAN:
+        return None
+    with open(p, "rb") as f:
+        f.seek(max(0, st.st_size - 400_000))
+        baris = f.read().decode("utf-8", "replace").splitlines()
+    if not baris:
+        return None
+    mulai = getattr(st, "st_birthtime", st.st_ctime)
+    folder = ""
+    tahap, n_tool, terakhir, selesai = "pelaksana", 0, "", None
+    for b in baris:
+        if b.startswith("· DIR "):
+            folder = b[6:].strip()
+        elif b.startswith("· T0 "):
+            try:
+                mulai = float(b[5:].strip())
+            except ValueError:
+                pass
+        elif b.startswith("▶"):
+            n_tool, terakhir = 0, ""
+            if "VERIFIKASI" in b:
+                tahap = "pemeriksa"
+            elif "PERBAIKAN" in b:
+                tahap = "perbaikan " + b.split("putaran=")[-1].split()[0]
+            else:
+                tahap = "kritik" if "tahap=kritik" in b else "pelaksana"
+        elif b.startswith("🔧"):
+            n_tool += 1
+            terakhir = ringkas_tool(b)
+        elif b.startswith("■ SELESAI"):
+            selesai = b
+    nama = os.path.basename(p)[: -len(".progress")]
+    if len(nama) > 18 and nama[:8].isdigit():   # nama otomatis 20261124-... → pendekkan
+        nama = nama[9:15]
+    return dict(p=p, nama=nama, mulai=mulai, mtime=st.st_mtime, tahap=tahap, n=n_tool,
+                akhir=terakhir, selesai=selesai, folder=folder)
+
+
+hasil = [r for r in (baca(p) for p in glob.glob(os.path.join(LOGDIR, "*.progress"))) if r]
+jalan = [r for r in hasil if not r["selesai"]]
+beres = [r for r in hasil if r["selesai"] and SEKARANG - r["mtime"] < TAMPIL_SELESAI]
+
+bagian = []
+for r in sorted(jalan, key=lambda r: -r["mtime"])[:2]:
+    lain = "" if not r["folder"] or cwd.startswith(r["folder"]) or r["folder"].startswith(cwd) \
+        else f" ({os.path.basename(r['folder'])})"
+    diam = SEKARANG - r["mtime"]
+    teks = f"🤖 Qwen {r['nama']}{lain} · {r['tahap']} · {menit(SEKARANG - r['mulai'])} · 🔧{r['n']}"
+    if diam > DIAM:
+        teks += f" · ⚠ diam {menit(diam)} (mati?)"
+    elif r["akhir"]:
+        teks += f" · {r['akhir']}"
+    bagian.append(teks)
+if len(jalan) > 2:
+    bagian.append(f"+{len(jalan) - 2} Qwen lain")
+if not jalan:
+    for r in sorted(beres, key=lambda r: -r["mtime"])[:1]:
+        v = r["selesai"].split("VERDIK=")[-1].split()[0] if "VERDIK=" in r["selesai"] else "-"
+        e = r["selesai"].split("EXIT=")[-1].split()[0] if "EXIT=" in r["selesai"] else "?"
+        ikon = "✅" if e == "0" and v in ("LULUS", "-", "TANPA_PERUBAHAN") else "⚠"
+        bagian.append(f"{ikon} Qwen {r['nama']} selesai EXIT={e} VERDIK={v} ({menit(SEKARANG - r['mtime'])} lalu)")
+
+dasar = " · ".join(x for x in (model, os.path.basename(cwd)) if x)
+print(" | ".join(bagian + ([dasar] if dasar else [])))

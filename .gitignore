@@ -1,0 +1,12 @@
+# Jangan pernah masukkan kunci/log ke repo
+.env
+*.key
+settings.json
+!qwen/settings.contoh.json
+qwen-logs/
+*.progress
+*.jsonl
+*.bak*
+.DS_Store
+prompt-*
+*PROMPT*

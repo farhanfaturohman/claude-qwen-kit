@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Pengawas Qwen HEMAT: hanya mencetak baris yang perlu ditanggapi Claude.
+
+Pakai (di Monitor):  qwen-awasi <progres.txt> [regex_area_boleh_tulis]
+Contoh:              qwen-awasi ~/.claude/qwen-logs/x.progress 'docs/notifikasi/|app/Support/'
+
+Dicetak (masing-masing jadi satu notifikasi untuk Claude):
+  - "▶ MULAI ..." dan "■ HASIL/■ SELESAI ..." (awal & akhir)
+  - ⚠ BAHAYA  : perintah shell berisiko (commit/push, rm -rf, migrate, DROP/DELETE/UPDATE/INSERT,
+                 db:wipe, artisan tinker dengan tulis, git reset/checkout --)
+  - ⚠ LUAR    : edit/write_file ke path yang TIDAK cocok regex area (bila regex diberikan)
+  - ⚠ PUTAR   : perintah shell yang persis sama muncul >= 3 kali (indikasi berputar-putar)
+Baris lain (berpikir, baca file, hasil tool biasa) DIAM — itu inti penghematan token Claude.
+Keluar saat baris '■ SELESAI' muncul.
+"""
+import collections
+import os
+import re
+import sys
+import time
+
+p = os.path.expanduser(sys.argv[1])
+area = re.compile(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
+
+BAHAYA = re.compile(
+    r"git\s+(commit|push|reset|checkout\s+--|clean)|rm\s+-r?f|migrate|db:wipe|"
+    r"\b(DROP|TRUNCATE|DELETE\s+FROM|UPDATE\s+\w+\s+SET|INSERT\s+INTO|ALTER\s+TABLE)\b",
+    re.I,
+)
+TULIS = re.compile(r"🔧\s*(edit|write_file|replace|notebook_edit)\s*:\s*(\S+)")
+
+hitung = collections.Counter()
+
+
+def periksa(b):
+    if b.startswith("▶") or b.startswith("■"):
+        return b
+    if not b.startswith("🔧"):
+        return None
+    # baca/edit file yang sama berkali-kali itu wajar (bagian berbeda); yang dihitung hanya
+    # perintah shell yang PERSIS sama
+    if "run_shell_command" in b:
+        hitung[b] += 1
+    if hitung[b] == 3:
+        return "⚠ PUTAR (3x sama): " + b[:200]
+    if "run_shell_command" in b and BAHAYA.search(b):
+        return "⚠ BAHAYA: " + b[:300]
+    m = TULIS.search(b)
+    if m and area and not area.search(m.group(2)):
+        return "⚠ LUAR area: " + b[:300]
+    return None
+
+
+while not os.path.exists(p):
+    time.sleep(0.5)
+pos = 0
+sisa = ""
+while True:
+    with open(p, encoding="utf-8", errors="replace") as f:
+        f.seek(pos)
+        data = f.read()
+        pos = f.tell()
+    if data:
+        sisa += data
+        *baris, sisa = sisa.split("\n")
+        for b in baris:
+            out = periksa(b)
+            if out:
+                print(out, flush=True)
+            if b.startswith("■ SELESAI"):
+                sys.exit(0)
+    time.sleep(1)

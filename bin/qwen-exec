@@ -1,0 +1,189 @@
+#!/bin/zsh
+# Pembungkus Qwen untuk Claude Code (v3, 2026-11-23): eksekusi → verifikasi independen oleh Qwen
+# → (bila perlu) perbaikan otomatis → verifikasi ulang. Claude cukup membaca VERDIK akhir.
+# Pakai: qwen-exec <eksekusi|kritik> [session-id-untuk-resume] < brief.txt
+# Env opsional:
+#   QWEN_AREA='<regex path>'   file berubah di luar regex ditandai ⚠ LUAR
+#   QWEN_RINGAN=1              cek cepat: tanpa baca AGENTS/QWEN.md, tanpa verifikasi
+#   QWEN_VERIFIKASI=0          matikan verifikasi otomatis (bawaan 1 untuk eksekusi)
+#   QWEN_PUTARAN=N             maks putaran perbaikan otomatis (bawaan 1; sensitif → 2)
+#   QWEN_MAX_TURNS / QWEN_MAX_WALL / QWEN_MAX_TOOLS (per sesi Qwen)  ·  QWEN_EKOR (bawaan 1500)
+#   QWEN_PROGRESS=<file>       file progres (untuk Monitor qwen-awasi)
+# Seluruh isi dibungkus fungsi utama(): zsh mengurai SEMUANYA sebelum jalan, jadi menyunting file
+# ini saat ada sesi berjalan tak lagi memicu "parse error" di tengah jalan (insiden 2026-11-24).
+# Pasang versi baru tetap lewat file sementara + mv (inode baru).
+set -u
+# uuid portabel (Linux minimal kadang tanpa uuidgen)
+uuid_baru() { { command -v uuidgen >/dev/null && uuidgen || python3 -c 'import uuid;print(uuid.uuid4())'; } | tr A-Z a-z; }
+utama() {
+TAHAP="${1:-eksekusi}"; RESUME="${2:-}"
+BRIEF="$(cat)"
+[[ -z "$BRIEF" ]] && { echo "brief kosong (kirim lewat stdin)"; exit 2; }
+SID="${RESUME:-$(uuid_baru)}"
+STAMP=$(date +%Y%m%d-%H%M%S)-${SID[1,8]}
+LOGDIR=~/.claude/qwen-logs
+LOG=$LOGDIR/$STAMP.jsonl
+PROG="${QWEN_PROGRESS:-$LOGDIR/$STAMP.progress}"
+: > "$PROG"
+{ echo "· DIR $PWD"; echo "· T0 $(date +%s)"; } >> "$PROG"   # untuk status line qwen-status
+SELESAI_TULIS=0
+# Penanda akhir dijamin ada walau gagal/dihentikan, supaya qwen-awasi & Claude tahu sesi berakhir.
+selesai_darurat() { [[ $SELESAI_TULIS == 1 ]] || { SELESAI_TULIS=1; echo "■ SELESAI EXIT=$1 VERDIK=${2:-GAGAL_PEMBUNGKUS} session=$SID" >> "$PROG"; }; }
+trap 'selesai_darurat $? GAGAL_PEMBUNGKUS' EXIT
+trap 'selesai_darurat 143 DIHENTIKAN; exit 143' TERM INT HUP
+EKOR="${QWEN_EKOR:-1500}"
+VERIF="${QWEN_VERIFIKASI:-1}"; PUTARAN="${QWEN_PUTARAN:-1}"
+[[ "$TAHAP" == kritik || -n "${QWEN_RINGAN:-}" ]] && VERIF=0
+
+FORMAT_EKS="LAPORAN AKHIR (ringkas, maks ±25 baris; rincian panjang tulis ke berkas lalu rujuk path-nya), format persis:
+FILE_DIUBAH: - path — apa yang berubah (satu baris per file)
+TES: perintah — LULUS/GAGAL (tempel hanya log kegagalan, bukan log yang lulus)
+KENDALA: hal yang belum selesai/ragu, atau '-'"
+if [[ "$TAHAP" == kritik ]]; then
+  PERAN="TAHAP: KRITIK READ-ONLY. Hanya baca dan nilai. DILARANG mengubah, membuat, atau menghapus file apa pun dan dilarang menjalankan perintah yang mengubah keadaan."
+  LAPOR="LAPORAN AKHIR (ringkas, maks ±25 baris; rincian panjang tulis ke berkas lalu rujuk path-nya): RISIKO, KEKURANGAN, USULAN KOREKSI, PERLU KEPUTUSAN PENGGUNA. Sertakan path:baris bila relevan."
+else
+  PERAN="TAHAP: EKSEKUSI. Kerjakan langsung sesuai brief. Jangan memanggil agen/Codex/Claude/Qwen lain dan jangan mendelegasikan ulang. Hasilmu akan diperiksa pemeriksa independen: jalankan sendiri tes yang relevan sebelum melapor."
+  LAPOR="$FORMAT_EKS
+Jika brief bermasalah atau butuh keputusan pengguna/melebihi batas: BERHENTI tanpa mengubah apa pun dan laporkan di KENDALA."
+fi
+if [[ -n "${QWEN_RINGAN:-}" ]]; then
+  BACA="MODE RINGAN: jangan membaca AGENTS.md/QWEN.md atau file lain kecuali brief memintanya."
+  LAPOR="Jawab singkat 1–5 baris."
+else
+  BACA="Baca AGENTS.md dan QWEN.md di root proyek bila ada (QWEN.md menunjuk lampiran per modul; baca lampiran hanya bila relevan dengan brief); aturannya mengikat."
+fi
+PAGAR="ATURAN MUTLAK (YOLO bukan izin memperluas tugas):
+- $BACA
+- Ubah hanya file/area yang disebut brief. Jangan menyentuh atau membuang perubahan lain yang sudah ada di working tree (milik pengguna).
+- DILARANG: git commit/push/reset/checkout/stash/clean, deploy, rm -rf, perintah destruktif, migrate*/db:wipe/DROP/TRUNCATE, RefreshDatabase, perintah artisan/skrip yang MENULIS ke basis data, mengirim data ke layanan eksternal, membaca rahasia (.env isi kunci, token) di luar kebutuhan.
+- Anggap koneksi basis data lokal = PRODUKSI. Kueri hanya SELECT bila perlu. Tes: hanya yang tidak menulis DB (Laravel: phpunit --testsuite Unit, phpstan)."
+
+# jalankan <tahap> <sid> <resume:0|1> <prompt> <log>
+jalankan() {
+  local args=(--yolo --advisor off --output-format stream-json --max-wall-time "${QWEN_MAX_WALL:-20m}" --max-session-turns "${QWEN_MAX_TURNS:-60}" --max-tool-calls "${QWEN_MAX_TOOLS:-250}")
+  if [[ "$3" == 1 ]]; then args+=(--resume "$2"); else args+=(--session-id "$2"); fi
+  # Kritik/verifikasi: plan mode memblokir read_file/grep di headless, jadi --yolo tanpa alat tulis.
+  [[ "$1" == kritik ]] && args+=(--exclude-tools edit write_file notebook_edit)
+  QWEN_CODE_SUPPRESS_YOLO_WARNING=1 qwen "$4" "${args[@]}" 2>>"$PROG" \
+    | python3 ~/.claude/bin/qwen-saring.py "$5" "$PROG" > "$5.laporan"
+  return ${pipestatus[1]}
+}
+
+# ---------- potret working tree ----------
+DIGIT=0; git rev-parse --is-inside-work-tree >/dev/null 2>&1 && DIGIT=1
+potret() {
+  [[ $DIGIT == 1 ]] || return 0
+  git status --porcelain=v1 -uall 2>/dev/null | cut -c4- | sed 's/.* -> //; s/^"//; s/"$//' |
+  while IFS= read -r f; do
+    if [[ -f "$f" ]]; then print -r -- "$(git hash-object -- "$f" 2>/dev/null) $f"; else print -r -- "HILANG $f"; fi
+  done | sort
+}
+SEBELUM=$(mktemp); UNTR=$(mktemp)
+potret > "$SEBELUM"
+BASIS=HEAD
+if [[ $DIGIT == 1 ]]; then
+  git ls-files --others --exclude-standard > "$UNTR" 2>/dev/null
+  B=$(git stash create 2>/dev/null); [[ -n "$B" ]] && BASIS=$B   # tak mengubah tree/stash list
+fi
+berubah() {
+  local s=$(mktemp); potret > "$s"
+  { comm -13 "$SEBELUM" "$s"; comm -23 "$SEBELUM" "$s"; } | cut -d' ' -f2- | sort -u
+  rm -f "$s"
+}
+# patch perubahan SESI INI saja (bukan perubahan pengguna yang sudah ada sebelumnya)
+buat_patch() {  # $1 = berkas keluaran
+  : > "$1"
+  [[ $DIGIT == 1 ]] || return 0
+  berubah | while IFS= read -r f; do
+    if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then git diff "$BASIS" -- "$f" >> "$1"
+    elif grep -qxF -- "$f" "$UNTR"; then { echo "### $f (untracked sebelum sesi; isi sebelumnya tak tersimpan, isi kini:)"; head -c 6000 "$f"; echo; } >> "$1"
+    elif [[ -f "$f" ]]; then git diff --no-index -- /dev/null "$f" >> "$1"
+    else echo "### $f DIHAPUS" >> "$1"; fi
+  done
+}
+
+# ---------- 1. eksekusi / kritik ----------
+PROMPT="$PERAN
+
+$PAGAR
+
+BRIEF:
+$BRIEF
+
+$LAPOR"
+echo "▶ MULAI tahap=$TAHAP session=$SID" >> "$PROG"
+jalankan "$TAHAP" "$SID" "$([[ -n $RESUME ]] && echo 1 || echo 0)" "$PROMPT" "$LOG"; RC=$?
+
+# ---------- 2. verifikasi independen + perbaikan otomatis ----------
+VERDIK="-"; PUT=0; VLOG=""
+if [[ $VERIF == 1 && $RC == 0 ]]; then
+  while true; do
+    PATCH=$LOG.patch; buat_patch "$PATCH"
+    if [[ $DIGIT == 1 && ! -s "$PATCH" ]]; then VERDIK="TANPA_PERUBAHAN"; break; fi
+    VSID=$(uuid_baru); VLOG=$LOGDIR/$STAMP-verif$PUT.jsonl
+    if [[ $DIGIT == 1 ]]; then SUMBER="PATCH perubahan sesi ini (hanya perubahan pelaksana, bukan perubahan pengguna sebelumnya): $PATCH — baca utuh; boleh baca kode sekitar untuk konteks."
+    else SUMBER="Folder ini bukan repo git (tak ada patch). Periksa langsung file yang disebut di laporan pelaksana."; fi
+    echo "▶ VERIFIKASI putaran=$PUT session=$VSID" >> "$PROG"
+    jalankan kritik "$VSID" 0 "TAHAP: VERIFIKASI INDEPENDEN READ-ONLY. Kamu pemeriksa, bukan pelaksana; jangan mengubah file apa pun. Jangan percaya laporan pelaksana begitu saja.
+
+$PAGAR
+
+BRIEF ASLI UNTUK PELAKSANA:
+$BRIEF
+
+LAPORAN PELAKSANA (ekor):
+$(tail -c 3000 "$LOG.laporan")
+
+$SUMBER
+
+Periksa: (1) setiap kriteria/tujuan brief benar-benar terpenuhi; (2) bug, regresi, kasus tepi, error sintaks; (3) perubahan di luar brief atau menimpa pekerjaan pengguna; (4) klaim TES — jalankan ulang tes yang relevan bila aman (hanya yang tidak menulis DB); (5) untuk dokumen/data: angka/isi tidak hilang atau berubah makna.
+Jawab PERSIS format ini (maks ±20 baris):
+VERDIK: LULUS | PERBAIKI | PERLU_CLAUDE
+ALASAN: 1–3 baris
+TEMUAN: - path:baris — masalah — koreksi yang diminta (maks 10; '-' bila tidak ada)
+CATATAN: saran mutu kecil yang tidak wajib (maks 3; '-' bila tidak ada)
+Pakai PERLU_CLAUDE bila: butuh keputusan pengguna, menyentuh perhitungan uang/nilai/autentikasi/skema DB dan ada keraguan, atau kamu tidak yakin. Pakai PERBAIKI hanya untuk masalah nyata yang bisa diperbaiki pelaksana: melanggar brief, bug/kasus tepi yang salah, keamanan, tes yang mengunci nilai salah. Saran mutu kecil (penamaan, tes bisa lebih ketat, gaya) TIDAK membuat PERBAIKI — tulis di baris CATATAN: dan tetap LULUS.
+Jangan membuka koneksi basis data (getPdo, tinker, query) untuk memeriksa — cukup baca kode.
+Setiap TEMUAN wajib berbukti (kutip baris kode atau hasil eksekusi). Klaim tentang perilaku framework/library WAJIB dicek dulu terhadap pemakaian yang sudah ada di repo: bila pola yang sama sudah dipakai dan berjalan di tempat lain, itu bukan bug. Temuan yang tak bisa kamu buktikan → CATATAN, bukan TEMUAN." "$VLOG"
+    VERDIK=$(grep -oE 'VERDIK:[[:space:]]*\**[[:space:]]*(LULUS|PERBAIKI|PERLU_CLAUDE)' "$VLOG.laporan" | tail -1 | grep -oE 'LULUS|PERBAIKI|PERLU_CLAUDE')
+    [[ -z "$VERDIK" ]] && VERDIK="TAK_TERBACA"
+    [[ "$VERDIK" != PERBAIKI || $PUT -ge $PUTARAN ]] && break
+    PUT=$((PUT+1))
+    echo "▶ PERBAIKAN putaran=$PUT session=$SID" >> "$PROG"
+    jalankan eksekusi "$SID" 1 "Pemeriksa independen menilai hasilmu PERBAIKI:
+$(tail -c 3000 "$VLOG.laporan")
+
+Untuk TIAP temuan: buktikan dulu (baca kode/jalankan) sebelum mengubah apa pun. Perbaiki hanya yang terbukti; yang tidak terbukti JANGAN diubah dan tulis di laporan sebagai baris 'DITOLAK: <temuan> — <bukti>'. Aturan & batas brief tetap sama.
+$FORMAT_EKS" "$LOG.fix$PUT"; RC=$?
+    [[ $RC != 0 ]] && { VERDIK="PERBAIKAN_GAGAL"; break; }
+  done
+fi
+
+# ---------- 3. keluaran ringkas untuk Claude ----------
+SELESAI_TULIS=1; echo "■ SELESAI EXIT=$RC VERDIK=$VERDIK session=$SID" >> "$PROG"
+echo "SESSION=$SID EXIT=$RC VERDIK=$VERDIK PUTARAN_PERBAIKAN=$PUT LOG=$LOG"
+[[ $RC == 55 ]] && echo "!! Qwen berhenti: batas waktu/tool habis — periksa perubahan parsial, lanjutkan dengan resume SESSION ini."
+[[ $RC == 53 ]] && echo "!! Qwen berhenti: batas turn habis — periksa perubahan parsial, lanjutkan dengan resume SESSION ini."
+BERUBAH=$(berubah)
+if [[ $DIGIT == 0 ]]; then
+  echo "FILE_BERUBAH: TIDAK DIUKUR — $PWD bukan repo git; andalkan laporan + verifikasi + qwen-awasi"
+elif [[ -n "$BERUBAH" ]]; then
+  echo "FILE_BERUBAH (diukur pembungkus; patch sesi: $LOG.patch):"
+  print -r -- "$BERUBAH" | while IFS= read -r f; do
+    if [[ -f "$f" ]] && [[ -z "$(git status --porcelain=v1 -- "$f" 2>/dev/null)" ]]; then
+      echo "  · BERSIH $f (kini sama dgn HEAD: di-commit/di-revert selama sesi — cek git log, biasanya bukan Qwen)"
+    elif [[ -n "${QWEN_AREA:-}" ]] && ! print -r -- "$f" | grep -Eq -- "$QWEN_AREA"; then echo "  ⚠ LUAR $f"
+    else echo "  - $f"; fi
+  done
+else
+  echo "FILE_BERUBAH (diukur pembungkus): tidak ada"
+fi
+rm -f "$SEBELUM" "$UNTR"
+if [[ -n "$VLOG" ]]; then echo "--- VERIFIKASI (Qwen independen):"; tail -c "$EKOR" "$VLOG.laporan"; fi
+echo "--- LAPORAN PELAKSANA:"
+if (( PUT > 0 )) && [[ -f "$LOG.fix$PUT.laporan" ]]; then tail -c "$EKOR" "$LOG.fix$PUT.laporan"; else tail -c "$EKOR" "$LOG.laporan"; fi
+return $RC
+}
+utama "$@"
+exit $?
