@@ -98,6 +98,29 @@ else
 fi
 if grep -q '<ISI_' "$HOME/.qwen/settings.json" 2>/dev/null; then awas "kunci API Qwen belum diisi"; fi
 
+echo "== Setelan kinerja Qwen (ubah lewat QWEN_RETRIES / QWEN_COMPACT, atau langsung di ~/.qwen/settings.json)"
+python3 - "$HOME/.qwen/settings.json" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+if not os.path.exists(p):
+    sys.exit(0)
+d = json.load(open(p)); ubah = []
+r_env, c_env = os.environ.get("QWEN_RETRIES"), os.environ.get("QWEN_COMPACT")
+for m in d.get("modelProviders", {}).get("openai", []):
+    if m.get("id") == d.get("model", {}).get("name"):
+        g = m.setdefault("generationConfig", {})
+        if r_env or "maxRetries" not in g or g.get("maxRetries", 0) < 2:
+            g["maxRetries"] = int(r_env or 3); ubah.append(f"maxRetries={g['maxRetries']}")
+ctx = d.setdefault("context", {})
+if c_env or "autoCompactThreshold" not in ctx:
+    ctx["autoCompactThreshold"] = float(c_env or 0.5); ubah.append(f"autoCompactThreshold={ctx['autoCompactThreshold']}")
+if ubah:
+    json.dump(d, open(p, "w"), indent=2, ensure_ascii=False); os.chmod(p, 0o600)
+    print("  ✓ " + ", ".join(ubah))
+else:
+    print("  • sudah diatur (nilai milikmu dipertahankan)")
+PY
+
 [[ -d "$CAD" ]] && info "versi lama dicadangkan di ${CAD/#$HOME/~}"
 
 if [[ "${1:-}" == --uji ]]; then

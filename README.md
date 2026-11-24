@@ -38,6 +38,32 @@ Server harus bisa menjangkau host LLM tersebut (cek firewall/proxy keluar).
 Cara termudah: tempel **prompt pemasangan** (disimpan pemilik di luar repo, berisi host & kunci) ke
 Claude Code di server — Claude menjalankan semua langkah di atas.
 
+## Pengaturan yang bisa disesuaikan
+
+**Saat pemasangan** (variabel lingkungan untuk `install.sh`; bila tak diberikan, nilai yang sudah ada dipertahankan):
+
+| Variabel | Bawaan | Arti |
+|---|---|---|
+| `QWEN_BASE_URL`, `QWEN_API_KEY`, `QWEN_MODEL` | — / — / `flash-next-fp8` | kredensial & model (ditulis ke `~/.qwen/settings.json`) |
+| `QWEN_RETRIES` | `3` | percobaan ulang API per permintaan (`generationConfig.maxRetries`) |
+| `QWEN_COMPACT` | `0.5` | ambang ringkasan konteks otomatis (`context.autoCompactThreshold`, 0–1). Lebih kecil = konteks ramping & cepat; lebih besar = ingatan panjang |
+
+**Saat menjalankan** `qwen-exec` (variabel lingkungan per panggilan):
+
+| Variabel | Bawaan | Arti |
+|---|---|---|
+| `QWEN_AREA` | — | regex path yang boleh ditulis; di luar itu ditandai ⚠ LUAR |
+| `QWEN_VERIFIKASI` | `1` | `0` = tanpa pemeriksa independen |
+| `QWEN_PUTARAN` | `1` | maks putaran perbaikan otomatis (sensitif → 2) |
+| `QWEN_PERBAIKAN` | `baru` | `baru` = perbaikan di sesi ramping (brief+patch+temuan); `lanjut` = lanjut sesi pelaksana |
+| `QWEN_ULANG_JARINGAN` / `QWEN_JEDA_ULANG` | `1` / `60` | ulang otomatis bila koneksi putus / jeda detik |
+| `QWEN_MAX_TURNS` / `QWEN_MAX_WALL` / `QWEN_MAX_TOOLS` | `60` / `20m` / `250` | batas per sesi Qwen (tugas besar: 150/45m/500) |
+| `QWEN_RINGAN` | — | `1` = cek cepat tanpa baca AGENTS/QWEN.md & tanpa verifikasi |
+| `QWEN_EKOR` | `1500` | byte tiap bagian laporan yang dicetak |
+
+Pagar keamanan (larangan commit/push/tulis DB/destruktif) dikirim lewat `--append-system-prompt`,
+jadi tetap berlaku walau konteks diringkas atau sesi dilanjutkan.
+
 ## Memperbarui
 
 - **Di mesin utama** setelah mengubah pembungkus/aturan: `./ambil.sh` → tinjau `git diff` → commit & push.

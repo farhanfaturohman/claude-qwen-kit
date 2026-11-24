@@ -10,7 +10,7 @@
         "generationConfig": {
           "contextWindowSize": 262144,
           "timeout": 600000,
-          "maxRetries": 1,
+          "maxRetries": 3,
           "modalities": {
             "image": true
           },
@@ -37,5 +37,8 @@
   },
   "env": {
     "KJG_LLM_API_KEY": "<ISI_KUNCI_API>"
+  },
+  "context": {
+    "autoCompactThreshold": 0.5
   }
 }

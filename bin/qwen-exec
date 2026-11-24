@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Pembungkus Qwen untuk Claude Code (v3, 2026-11-23): eksekusi → verifikasi independen oleh Qwen
+# Pembungkus Qwen untuk Claude Code (v4, 2026-11-24): eksekusi → verifikasi independen oleh Qwen
 # → (bila perlu) perbaikan otomatis → verifikasi ulang. Claude cukup membaca VERDIK akhir.
 # Pakai: qwen-exec <eksekusi|kritik> [session-id-untuk-resume] < brief.txt
 # Env opsional:
@@ -9,6 +9,9 @@
 #   QWEN_PUTARAN=N             maks putaran perbaikan otomatis (bawaan 1; sensitif → 2)
 #   QWEN_MAX_TURNS / QWEN_MAX_WALL / QWEN_MAX_TOOLS (per sesi Qwen)  ·  QWEN_EKOR (bawaan 1500)
 #   QWEN_PROGRESS=<file>       file progres (untuk Monitor qwen-awasi)
+#   QWEN_PERBAIKAN=baru|lanjut perbaikan otomatis di sesi baru (bawaan, ringan) atau lanjut sesi pelaksana
+#   QWEN_ULANG_JARINGAN=N      ulang otomatis bila putus jaringan (bawaan 1; jeda QWEN_JEDA_ULANG=60 dtk)
+# v4 (2026-11-24): pagar di --append-system-prompt (tahan ringkasan konteks & resume).
 # Seluruh isi dibungkus fungsi utama(): zsh mengurai SEMUANYA sebelum jalan, jadi menyunting file
 # ini saat ada sesi berjalan tak lagi memicu "parse error" di tengah jalan (insiden 2026-11-24).
 # Pasang versi baru tetap lewat file sementara + mv (inode baru).
@@ -65,9 +68,24 @@ jalankan() {
   if [[ "$3" == 1 ]]; then args+=(--resume "$2"); else args+=(--session-id "$2"); fi
   # Kritik/verifikasi: plan mode memblokir read_file/grep di headless, jadi --yolo tanpa alat tulis.
   [[ "$1" == kritik ]] && args+=(--exclude-tools edit write_file notebook_edit)
+  args+=(--append-system-prompt "$PAGAR")
   QWEN_CODE_SUPPRESS_YOLO_WARNING=1 qwen "$4" "${args[@]}" 2>>"$PROG" \
     | python3 ~/.claude/bin/qwen-saring.py "$5" "$PROG" > "$5.laporan"
   return ${pipestatus[1]}
+}
+JARINGAN='Connection error|ENOTFOUND|EHOSTUNREACH|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|terminated|No stream activity|fetch failed'
+# jalankan_tahan: seperti jalankan, tapi bila gagal karena jaringan → jeda lalu lanjutkan sesi yang sama
+jalankan_tahan() {
+  local rc n=0
+  jalankan "$@"; rc=$?
+  while [[ $rc != 0 && $rc != 53 && $rc != 55 ]] && (( n < ${QWEN_ULANG_JARINGAN:-1} )) && grep -E '^!! ' "$5.laporan" 2>/dev/null | grep -qE "$JARINGAN"; do
+    n=$((n+1))
+    echo "⚠ JARINGAN putus — ulang otomatis ke-$n dalam ${QWEN_JEDA_ULANG:-60} dtk (session=$2)" >> "$PROG"
+    sleep "${QWEN_JEDA_ULANG:-60}"
+    mv -f "$5.laporan" "$5.putus$n.laporan"
+    jalankan "$1" "$2" 1 "Koneksi ke model sempat putus. Lanjutkan tugas tadi dari titik terakhir (periksa dulu keadaan file; jangan ulang dari nol), lalu tulis laporan akhir sesuai format." "$5"; rc=$?
+  done
+  return $rc
 }
 
 # ---------- potret working tree ----------
@@ -104,16 +122,17 @@ buat_patch() {  # $1 = berkas keluaran
 }
 
 # ---------- 1. eksekusi / kritik ----------
+PENGINGAT="(Patuhi ATURAN MUTLAK di system prompt: area brief saja, tanpa commit/tulis DB/perintah destruktif.)"
 PROMPT="$PERAN
-
-$PAGAR
+$PENGINGAT
 
 BRIEF:
 $BRIEF
 
 $LAPOR"
 echo "▶ MULAI tahap=$TAHAP session=$SID" >> "$PROG"
-jalankan "$TAHAP" "$SID" "$([[ -n $RESUME ]] && echo 1 || echo 0)" "$PROMPT" "$LOG"; RC=$?
+jalankan_tahan "$TAHAP" "$SID" "$([[ -n $RESUME ]] && echo 1 || echo 0)" "$PROMPT" "$LOG"; RC=$?
+SID_AKHIR=$SID
 
 # ---------- 2. verifikasi independen + perbaikan otomatis ----------
 VERDIK="-"; PUT=0; VLOG=""
@@ -125,9 +144,8 @@ if [[ $VERIF == 1 && $RC == 0 ]]; then
     if [[ $DIGIT == 1 ]]; then SUMBER="PATCH perubahan sesi ini (hanya perubahan pelaksana, bukan perubahan pengguna sebelumnya): $PATCH — baca utuh; boleh baca kode sekitar untuk konteks."
     else SUMBER="Folder ini bukan repo git (tak ada patch). Periksa langsung file yang disebut di laporan pelaksana."; fi
     echo "▶ VERIFIKASI putaran=$PUT session=$VSID" >> "$PROG"
-    jalankan kritik "$VSID" 0 "TAHAP: VERIFIKASI INDEPENDEN READ-ONLY. Kamu pemeriksa, bukan pelaksana; jangan mengubah file apa pun. Jangan percaya laporan pelaksana begitu saja.
-
-$PAGAR
+    jalankan_tahan kritik "$VSID" 0 "TAHAP: VERIFIKASI INDEPENDEN READ-ONLY. Kamu pemeriksa, bukan pelaksana; jangan mengubah file apa pun. Jangan percaya laporan pelaksana begitu saja.
+$PENGINGAT
 
 BRIEF ASLI UNTUK PELAKSANA:
 $BRIEF
@@ -150,19 +168,40 @@ Setiap TEMUAN wajib berbukti (kutip baris kode atau hasil eksekusi). Klaim tenta
     [[ -z "$VERDIK" ]] && VERDIK="TAK_TERBACA"
     [[ "$VERDIK" != PERBAIKI || $PUT -ge $PUTARAN ]] && break
     PUT=$((PUT+1))
-    echo "▶ PERBAIKAN putaran=$PUT session=$SID" >> "$PROG"
-    jalankan eksekusi "$SID" 1 "Pemeriksa independen menilai hasilmu PERBAIKI:
+    ATURAN_FIX="Untuk TIAP temuan: buktikan dulu (baca kode/jalankan) sebelum mengubah apa pun. Perbaiki hanya yang terbukti; yang tidak terbukti JANGAN diubah dan tulis di laporan sebagai baris 'DITOLAK: <temuan> — <bukti>'. Aturan & batas brief tetap sama."
+    if [[ "${QWEN_PERBAIKAN:-baru}" == lanjut || $DIGIT == 0 ]]; then
+      FSID=$SID; FRES=1
+      FPROMPT="Pemeriksa independen menilai hasilmu PERBAIKI:
 $(tail -c 3000 "$VLOG.laporan")
 
-Untuk TIAP temuan: buktikan dulu (baca kode/jalankan) sebelum mengubah apa pun. Perbaiki hanya yang terbukti; yang tidak terbukti JANGAN diubah dan tulis di laporan sebagai baris 'DITOLAK: <temuan> — <bukti>'. Aturan & batas brief tetap sama.
-$FORMAT_EKS" "$LOG.fix$PUT"; RC=$?
+$ATURAN_FIX
+$FORMAT_EKS"
+    else
+      # sesi baru yang ramping: brief + patch + temuan (tanpa seluruh riwayat pelaksana)
+      FSID=$(uuid_baru); FRES=0
+      FPROMPT="TAHAP: PERBAIKAN. Pelaksana sebelumnya SUDAH mengerjakan brief di bawah; perubahannya sudah ada di working tree, ringkasannya di patch $PATCH (baca utuh dulu). Jangan mengulang dari nol dan jangan membatalkan perubahan yang benar — perbaiki hanya temuan pemeriksa. Jangan memanggil agen lain.
+$PENGINGAT
+
+BRIEF ASLI:
+$BRIEF
+
+TEMUAN PEMERIKSA INDEPENDEN (PERBAIKI):
+$(tail -c 3000 "$VLOG.laporan")
+
+$ATURAN_FIX Jalankan ulang tes yang relevan sebelum melapor.
+$FORMAT_EKS"
+    fi
+    echo "▶ PERBAIKAN putaran=$PUT session=$FSID" >> "$PROG"
+    jalankan_tahan eksekusi "$FSID" "$FRES" "$FPROMPT" "$LOG.fix$PUT"; RC=$?
+    SID_AKHIR=$FSID
     [[ $RC != 0 ]] && { VERDIK="PERBAIKAN_GAGAL"; break; }
   done
 fi
 
 # ---------- 3. keluaran ringkas untuk Claude ----------
-SELESAI_TULIS=1; echo "■ SELESAI EXIT=$RC VERDIK=$VERDIK session=$SID" >> "$PROG"
-echo "SESSION=$SID EXIT=$RC VERDIK=$VERDIK PUTARAN_PERBAIKAN=$PUT LOG=$LOG"
+SELESAI_TULIS=1; echo "■ SELESAI EXIT=$RC VERDIK=$VERDIK session=$SID_AKHIR" >> "$PROG"
+echo "SESSION=$SID_AKHIR EXIT=$RC VERDIK=$VERDIK PUTARAN_PERBAIKAN=$PUT LOG=$LOG"
+[[ "$SID_AKHIR" != "$SID" ]] && echo "(SESSION = sesi perbaikan terakhir, untuk revisi; sesi pelaksana awal: $SID)"
 [[ $RC == 55 ]] && echo "!! Qwen berhenti: batas waktu/tool habis — periksa perubahan parsial, lanjutkan dengan resume SESSION ini."
 [[ $RC == 53 ]] && echo "!! Qwen berhenti: batas turn habis — periksa perubahan parsial, lanjutkan dengan resume SESSION ini."
 BERUBAH=$(berubah)

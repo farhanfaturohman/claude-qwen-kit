@@ -49,6 +49,9 @@ BRIEF
 - **Eksekusi otomatis berlapis** (v3): pelaksana → **Qwen pemeriksa independen** (sesi baru, read-only,
   membaca patch sesi ini saja, menjalankan ulang tes) → bila PERBAIKI, pelaksana memperbaiki otomatis
   (`QWEN_PUTARAN`, bawaan 1; sensitif → 2) → diperiksa ulang. Matikan: `QWEN_VERIFIKASI=0`.
+  v4: pagar di system prompt (tahan ringkasan konteks); perbaikan di **sesi baru** ramping (brief+patch+
+  temuan; `QWEN_PERBAIKAN=lanjut` = cara lama); putus jaringan → ulang otomatis 1× (`⚠ JARINGAN` di progres).
+  Bila ada perbaikan, `SESSION=` di output = sesi perbaikan terakhir (pakai itu untuk revisi).
 - Output: `SESSION= EXIT= VERDIK=` · **FILE_BERUBAH** (diukur pembungkus, termasuk file yang sudah kotor;
   patch sesi di `<log>.patch`) · ekor VERIFIKASI · ekor LAPORAN PELAKSANA. Log penuh di
   `~/.claude/qwen-logs/`; baca hanya bila perlu.
