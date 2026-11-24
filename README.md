@@ -8,7 +8,7 @@ mana pun: laptop, server, atau VM.
 |---|---|
 | `bin/qwen-exec` — pembungkus: pelaksana → pemeriksa independen → perbaikan otomatis | `~/.claude/bin/` |
 | `bin/qwen-saring.py`, `qwen-awasi`, `qwen-ikuti` — saringan progres & pemantau | `~/.claude/bin/` |
-| `bin/qwen-status` — status line progres Qwen (lokal, **nol token Claude**) | `~/.claude/bin/` + `settings.json` |
+| `bin/qwen-status` — status line progres Qwen + judul tab ⏳ selama Qwen jalan (lokal, **nol token Claude**) | `~/.claude/bin/` + `settings.json` |
 | `claude/CLAUDE.md` — aturan global Claude (kapan Qwen, brief, gerbang VERDIK) | `~/.claude/CLAUDE.md` |
 | `qwen/QWEN.md` — aturan global Qwen | `~/.qwen/QWEN.md` |
 | `qwen/settings.contoh.json` — kerangka konfigurasi model **tanpa host & kunci** | `~/.qwen/settings.json` (hanya bila belum ada) |
@@ -60,6 +60,11 @@ Claude Code di server — Claude menjalankan semua langkah di atas.
 | `QWEN_MAX_TURNS` / `QWEN_MAX_WALL` / `QWEN_MAX_TOOLS` | `60` / `20m` / `250` | batas per sesi Qwen (tugas besar: 150/45m/500) |
 | `QWEN_RINGAN` | — | `1` = cek cepat tanpa baca AGENTS/QWEN.md & tanpa verifikasi |
 | `QWEN_EKOR` | `1500` | byte tiap bagian laporan yang dicetak |
+
+**Judul tab terminal:** selama Qwen yang diluncurkan sesi Claude itu berjalan, judul tab menjadi
+`⏳ Qwen <tahap> <durasi> · <proyek>`; setelah selesai kembali `✳ <proyek>`. Hanya tab pemilik sesi
+yang berubah. Matikan dengan `"env": {"QWEN_JUDUL": "0"}` di `~/.claude/settings.json`.
+(VS Code: judul dari proses tampil bila `terminal.integrated.tabs.title` memuat `${sequence}`.)
 
 Pagar keamanan (larangan commit/push/tulis DB/destruktif) dikirim lewat `--append-system-prompt`,
 jadi tetap berlaku walau konteks diringkas atau sesi dilanjutkan.

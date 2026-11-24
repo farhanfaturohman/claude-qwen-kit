@@ -28,7 +28,7 @@ LOGDIR=~/.claude/qwen-logs
 LOG=$LOGDIR/$STAMP.jsonl
 PROG="${QWEN_PROGRESS:-$LOGDIR/$STAMP.progress}"
 : > "$PROG"
-{ echo "· DIR $PWD"; echo "· T0 $(date +%s)"; } >> "$PROG"   # untuk status line qwen-status
+{ echo "· DIR $PWD"; echo "· T0 $(date +%s)"; [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] && echo "· CC $CLAUDE_CODE_SESSION_ID"; } >> "$PROG"   # untuk qwen-status (status line + judul ⏳)
 SELESAI_TULIS=0
 # Penanda akhir dijamin ada walau gagal/dihentikan, supaya qwen-awasi & Claude tahu sesi berakhir.
 selesai_darurat() { [[ $SELESAI_TULIS == 1 ]] || { SELESAI_TULIS=1; echo "■ SELESAI EXIT=$1 VERDIK=${2:-GAGAL_PEMBUNGKUS} session=$SID" >> "$PROG"; }; }

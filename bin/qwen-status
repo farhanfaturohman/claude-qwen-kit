@@ -22,6 +22,7 @@ except Exception:
     sesi = {}
 cwd = (sesi.get("workspace") or {}).get("current_dir") or sesi.get("cwd") or os.getcwd()
 model = (sesi.get("model") or {}).get("display_name") or ""
+sesi_id = sesi.get("session_id") or ""
 
 
 def menit(detik):
@@ -53,10 +54,13 @@ def baca(p):
         return None
     mulai = getattr(st, "st_birthtime", st.st_ctime)
     folder = ""
+    cc = ""
     tahap, n_tool, terakhir, selesai = "pelaksana", 0, "", None
     for b in baris:
         if b.startswith("· DIR "):
             folder = b[6:].strip()
+        elif b.startswith("· CC "):
+            cc = b[5:].strip()
         elif b.startswith("· T0 "):
             try:
                 mulai = float(b[5:].strip())
@@ -79,7 +83,7 @@ def baca(p):
     if len(nama) > 18 and nama[:8].isdigit():   # nama otomatis 20261124-... → pendekkan
         nama = nama[9:15]
     return dict(p=p, nama=nama, mulai=mulai, mtime=st.st_mtime, tahap=tahap, n=n_tool,
-                akhir=terakhir, selesai=selesai, folder=folder)
+                akhir=terakhir, selesai=selesai, folder=folder, cc=cc)
 
 
 hasil = [r for r in (baca(p) for p in glob.glob(os.path.join(LOGDIR, "*.progress"))) if r]
@@ -105,6 +109,48 @@ if not jalan:
         e = r["selesai"].split("EXIT=")[-1].split()[0] if "EXIT=" in r["selesai"] else "?"
         ikon = "✅" if e == "0" and v in ("LULUS", "-", "TANPA_PERUBAHAN") else "⚠"
         bagian.append(f"{ikon} Qwen {r['nama']} selesai EXIT={e} VERDIK={v} ({menit(SEKARANG - r['mtime'])} lalu)")
+
+# ---- judul tab terminal: ⏳ selama Qwen milik SESI INI berjalan, ✳ sekali saat selesai ----
+# Claude Code menulis ✳ saat gilirannya usai; ditegaskan ulang tiap refresh selama Qwen jalan.
+# Matikan: QWEN_JUDUL=0 di env settings.json.
+def tty_claude():
+    # Proses status line bisa tanpa terminal pengendali → pakai TTY proses Claude (CLAUDE_PID / induk).
+    import subprocess
+    for pid in (os.environ.get("CLAUDE_PID"), str(os.getppid())):
+        if not pid:
+            continue
+        try:
+            t = subprocess.run(["ps", "-o", "tty=", "-p", pid], capture_output=True, text=True, timeout=2).stdout.strip()
+        except Exception:
+            continue
+        if t and t not in ("?", "??"):
+            return t if t.startswith("/dev/") else "/dev/" + t
+    return None
+
+
+def tulis_judul(teks):
+    seq = f"\033]0;{teks}\007"
+    for jalur in ("/dev/tty", tty_claude()):
+        if not jalur:
+            continue
+        try:
+            with open(jalur, "w") as tty:
+                tty.write(seq); tty.flush()
+            return
+        except OSError:
+            continue
+
+if sesi_id and os.environ.get("QWEN_JUDUL", "1") != "0":
+    milik = [r for r in jalan if r["cc"] == sesi_id]
+    tanda = os.path.join(LOGDIR, f".judul-{sesi_id}")
+    proyek = os.path.basename(cwd)
+    if milik:
+        r = max(milik, key=lambda r: r["mtime"])
+        tulis_judul(f"⏳ Qwen {r['tahap']} {menit(SEKARANG - r['mulai'])} · {proyek}")
+        open(tanda, "w").write("jalan")
+    elif os.path.exists(tanda):
+        tulis_judul(f"✳ {proyek}")
+        os.remove(tanda)
 
 dasar = " · ".join(x for x in (model, os.path.basename(cwd)) if x)
 print(" | ".join(bagian + ([dasar] if dasar else [])))
