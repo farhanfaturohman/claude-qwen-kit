@@ -92,5 +92,9 @@ BRIEF
   gemuk). Aturan modul ditaruh di `docs/qwen/<topik>.md` + tabel pemicu di QWEN.md (pola repo pegawai,
   commit 2e8196fb7). Bila menemukan QWEN.md > 5 KB di proyek mana pun → tawarkan pecah via Qwen
   dengan verifikasi baris 100%.
+- **Blokir DB berbahaya** (hook `~/.claude/bin/jaga-db`, Claude Bash + Qwen run_shell_command, berlaku juga
+  di yolo): migrate tanpa --pretend + varian fresh/refresh/reset/rollback, wipe, seed, DROP/TRUNCATE/DELETE
+  tanpa WHERE, Schema drop, tes non-Unit. Bila DITOLAK: jangan cari jalan lain; minta pengguna jalankan manual.
+  Positif palsu (teks perintah memuat pola) → pakai alat Edit/Grep, bukan Bash.
 - Commit hanya bila pengguna minta; Qwen tidak pernah commit. Jangan klaim angka penghematan token
   yang tidak diukur.

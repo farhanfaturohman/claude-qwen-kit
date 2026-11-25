@@ -121,6 +121,25 @@ else:
     print("  • sudah diatur (nilai milikmu dipertahankan)")
 PY
 
+echo "== Blokir perintah DB berbahaya (hook jaga-db untuk Claude & Qwen, berlaku juga di --yolo)"
+python3 - "$HOME/.claude/bin/jaga-db" "$HOME/.claude/settings.json:Bash" "$HOME/.qwen/settings.json:run_shell_command" <<'PY'
+import json, os, sys
+jaga = sys.argv[1]
+for arg in sys.argv[2:]:
+    p, matcher = arg.rsplit(":", 1)
+    d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) else {}
+    pre = d.setdefault("hooks", {}).setdefault("PreToolUse", [])
+    mau = {"matcher": matcher, "hooks": [{"type": "command", "command": jaga, "timeout": 10}]}
+    if mau in pre:
+        print(f"  • sama: {p.replace(os.path.expanduser('~'), '~')}"); continue
+    pre[:] = [h for h in pre if "jaga-db" not in json.dumps(h)]
+    pre.insert(0, mau)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    mode = os.stat(p).st_mode & 0o777 if os.path.exists(p) else 0o600
+    t = p + ".kit-tmp"; json.dump(d, open(t, "w"), indent=2, ensure_ascii=False); os.chmod(t, mode); os.replace(t, p)
+    print(f"  ✓ hook jaga-db ({matcher}) → {p.replace(os.path.expanduser('~'), '~')}")
+PY
+
 [[ -d "$CAD" ]] && info "versi lama dicadangkan di ${CAD/#$HOME/~}"
 
 if [[ "${1:-}" == --uji ]]; then

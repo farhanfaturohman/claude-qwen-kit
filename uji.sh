@@ -55,6 +55,14 @@ urut=$(tr '\n' ',' < "$T/args")
 cek "v4: VERDIK=LULUS setelah 1 perbaikan" "grep -q 'VERDIK=LULUS PUTARAN_PERBAIKAN=1' '$T/o4'"
 cek "v4: urutan pelaksana,ulang,periksa,perbaikan-baru,periksa (+pagar)" "[ \"\$urut\" = 'PELAKSANA baru pagar,ULANG resume pagar,PERIKSA baru pagar,PERBAIKAN baru pagar,PERIKSA baru pagar,' ]"
 
+J="$HOME/.claude/bin/jaga-db"
+jaga() { python3 -c 'import json,sys;print(json.dumps({"tool_input":{"command":sys.argv[1]}}))' "$1" | "$J" 2>/dev/null; echo $?; }
+tolak=0; for x in "php artisan migrate:fre""sh" "cd x && php artisan migrate:roll""back" "php artisan db:wi""pe" "php artisan migr""ate" \
+  "php artisan db:se""ed" "mysql -e 'DROP TA""BLE x'" "vendor/bin/php""unit"; do [ "$(jaga "$x")" = 2 ] || { tolak=1; echo "    lolos: $x"; }; done
+boleh=0; for x in "php artisan migrate:status" "vendor/bin/phpunit --testsuite Unit" "git status" "mysql -e 'select 1'"; do
+  [ "$(jaga "$x")" = 0 ] || { boleh=1; echo "    terblokir: $x"; }; done
+cek "jaga-db menolak perintah DB berbahaya & meloloskan yang aman" "[ $tolak = 0 ] && [ $boleh = 0 ]"
+
 out=$(echo "{\"workspace\":{\"current_dir\":\"$T/repo\"}}" | "$HOME/.claude/bin/qwen-status")
 cek "qwen-status jalan: $out" "[ -n \"\$out\" ]"
 exit $gagal

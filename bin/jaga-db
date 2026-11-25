@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Penjaga perintah database berbahaya — hook PreToolUse untuk Claude Code (Bash) & Qwen Code
+(run_shell_command). Berlaku juga di --yolo / bypass permissions. Exit 2 = perintah DITOLAK.
+Uji manual:  echo '{"tool_input":{"command":"php artisan migrate:fresh"}}' | jaga-db; echo $?
+"""
+import json, re, sys
+
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+ti = d.get("tool_input") or d.get("toolInput") or {}
+cmd = ti.get("command") if isinstance(ti, dict) else None
+if not isinstance(cmd, str) or not cmd.strip():
+    sys.exit(0)
+c = re.sub(r"\s+", " ", cmd.lower())
+I = re.I
+
+ATURAN = [
+    # artisan yang menghapus/mengubah skema & data
+    (r"\b(migrate:(fresh|refresh|reset|rollback|install)|db:wipe|schema:drop)\b",
+     "artisan migrate:fresh/refresh/reset/rollback / db:wipe menghapus data"),
+    (r"\bdb:seed\b|\bmigrate\b[^;&|]*--seed\b", "db:seed menulis data ke DB (DB lokal = PRODUKSI)"),
+    (r"\bartisan\b[^;&|]*\bmigrate(?![:\w-])(?![^;&|]*--pretend)", "artisan migrate (tanpa --pretend) mengubah skema DB produksi"),
+    # SQL destruktif lewat klien DB / tinker / skrip
+    (r"\b(drop\s+(database|schema|table|view)|truncate\s+(table\s+)?[`\"\w]|alter\s+table\s+\S+\s+drop\b)",
+     "SQL DROP/TRUNCATE/ALTER…DROP"),
+    (r"\bdelete\s+from\s+[`\"\w.]+(?![^;'\"]*\bwhere\b)", "SQL DELETE tanpa WHERE"),
+    (r"schema::(drop|dropifexists|dropalltables)|->truncate\(|dropalltables|db::unprepared",
+     "Schema::drop / truncate() / dropAllTables"),
+    (r"\bmysqladmin\b[^;&|]*\bdrop\b|\bdropdb\b|\bflushall\b|\bflushdb\b", "hapus database/redis"),
+    # tes yang memakai RefreshDatabase/DatabaseMigrations → mengosongkan DB
+    (r"(^|[\s;&|/(])(phpunit|pest|paratest)(\s|$)|\bartisan\s+test\b", None),
+]
+
+for pola, alasan in ATURAN:
+    if not re.search(pola, c, I):
+        continue
+    if alasan is None:  # aturan tes: hanya suite Unit / info yang boleh
+        if re.search(r"unit|--version|--help|--list-(tests|suites)", c.replace("phpunit", "")):
+            continue
+        alasan = "tes selain suite Unit bisa memakai RefreshDatabase (mengosongkan DB). Pakai --testsuite Unit"
+    sys.stderr.write(
+        f"DITOLAK jaga-db: {alasan}.\n"
+        "Perintah database berbahaya diblokir untuk Claude & Qwen (DB lokal = PRODUKSI). "
+        "Jangan coba cara lain untuk menjalankannya; laporkan ke pengguna bila memang perlu — "
+        "pengguna menjalankannya sendiri secara manual.\n")
+    sys.exit(2)
+sys.exit(0)

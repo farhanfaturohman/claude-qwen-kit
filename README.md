@@ -9,6 +9,7 @@ mana pun: laptop, server, atau VM.
 | `bin/qwen-exec` — pembungkus: pelaksana → pemeriksa independen → perbaikan otomatis | `~/.claude/bin/` |
 | `bin/qwen-saring.py`, `qwen-awasi`, `qwen-ikuti` — saringan progres & pemantau | `~/.claude/bin/` |
 | `bin/qwen-status` — status line progres Qwen + judul tab ⏳ selama Qwen jalan (lokal, **nol token Claude**) | `~/.claude/bin/` + `settings.json` |
+| `bin/jaga-db` — hook pemblokir perintah DB berbahaya untuk Claude & Qwen (aktif juga di `--yolo`) | `~/.claude/bin/` + hook di kedua `settings.json` |
 | `claude/CLAUDE.md` — aturan global Claude (kapan Qwen, brief, gerbang VERDIK) | `~/.claude/CLAUDE.md` |
 | `qwen/QWEN.md` — aturan global Qwen | `~/.qwen/QWEN.md` |
 | `qwen/settings.contoh.json` — kerangka konfigurasi model **tanpa host & kunci** | `~/.qwen/settings.json` (hanya bila belum ada) |
@@ -68,6 +69,23 @@ yang berubah. Matikan dengan `"env": {"QWEN_JUDUL": "0"}` di `~/.claude/settings
 
 Pagar keamanan (larangan commit/push/tulis DB/destruktif) dikirim lewat `--append-system-prompt`,
 jadi tetap berlaku walau konteks diringkas atau sesi dilanjutkan.
+
+**Blokir teknis perintah DB berbahaya** (`bin/jaga-db`, hook `PreToolUse` di `~/.claude/settings.json`
+untuk `Bash` dan di `~/.qwen/settings.json` untuk `run_shell_command`). Hook ini tetap aktif walau
+Qwen `--yolo` atau Claude bypass permissions. Perintah ditolak (exit 2) dan model diminta melapor ke pengguna:
+
+| Ditolak | Tetap boleh |
+|---|---|
+| `artisan migrate` (tanpa `--pretend`), `migrate:fresh/refresh/reset/rollback/install`, `db:wipe`, `schema:drop`, `db:seed`, `--seed` | `migrate:status`, `migrate --pretend` |
+| SQL `DROP DATABASE/TABLE/SCHEMA/VIEW`, `TRUNCATE`, `ALTER TABLE … DROP`, `DELETE FROM` tanpa `WHERE` | `SELECT`, `DELETE … WHERE` |
+| `Schema::drop*`, `->truncate()`, `dropAllTables`, `DB::unprepared`, `mysqladmin drop`, `dropdb`, `FLUSHALL/FLUSHDB` | |
+| `phpunit`/`pest`/`artisan test` selain suite Unit (RefreshDatabase mengosongkan DB) | `--testsuite Unit`, `tests/Unit/…` |
+
+Pencocokan memakai teks perintah, jadi ada juga positif palsu, misalnya `grep "migrate:fresh"` lewat
+shell (pakai alat Grep bawaan sebagai gantinya). Uji manual:
+`echo '{"tool_input":{"command":"php artisan db:wipe"}}' | ~/.claude/bin/jaga-db; echo $?` → `2`.
+Pola ada di `ATURAN` dalam `bin/jaga-db`; sunting di sana lalu `./install.sh` ulang.
+Ini lapisan pengaman terhadap kelalaian model, **bukan** sandbox. Lapisan terkuat tetap user DB read-only.
 
 ## Memperbarui
 
