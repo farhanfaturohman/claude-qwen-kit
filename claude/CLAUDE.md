@@ -29,6 +29,25 @@ kode, mengukur, menulis, menguji, menulis laporan). Berlaku di semua proyek.
 Ringkas: tujuan · file/area boleh diubah (path:baris bila sudah tahu) · yang tak boleh disentuh ·
 kriteria selesai · perintah tes. Rujuk berkas yang ada (handoff/§nomor) alih-alih menyalin. Boleh
 beberapa langkah berurutan dalam satu brief. Lokasi belum diketahui → biarkan Qwen mencari.
+**Pecah kecil (Qwen lambat bila jelajah luas / tugas besar):** satu brief = satu area, ±1–5 file, target
+selesai ≤15 menit. Tugas besar → urutan brief kecil (tiap brief diverifikasi sendiri; brief berikut merujuk
+hasil sebelumnya), bukan satu brief raksasa. Lokasi belum jelas → dulu `kritik` ringan "petakan file:baris
+sasaran, tulis ke <berkas>" (QWEN_MAX_TURNS=25), lalu brief eksekusi merujuk peta itu → Qwen tak perlu jelajah.
+**SASARAN:** sebut path(:baris) yang Claude sudah tahu — pembungkus menyuruh Qwen langsung ke sana.
+**TITIK CEK:** (wajib untuk eksekusi; bagian berjudul `TITIK CEK:` diakhiri baris kosong) 2–6 butir terukur yang
+Claude petakan dari tujuan, satu baris bernomor per butir (bagian berhenti di baris kosong/`Kata:` berikutnya) —
+`$ grep -q 'X' path`, `$ php vendor/bin/phpunit --testsuite Unit --filter Y`, atau kalimat untuk pemeriksa
+("rute Z memuat teks W", "tak ada perubahan di luar A/B"). `$` hanya perintah BACA (>, rm, sed -i ditolak). Pelaksana melapor `CEK n: ✓/✗ — bukti`; pemeriksa wajib
+menilai tiap butir; satu ✗ → otomatis PERBAIKI walau tertulis LULUS. Output memuat `TITIK_CEK: a ✓ · b ✗`.
+Utamakan butir **`$ perintah`** (mis. `1. $ grep -q 'x' path`, `$ php -l path`, `$ php vendor/bin/phpunit --testsuite Unit
+--filter Y`): dijalankan MESIN pembungkus (lewat jaga-db), objektif, ✗ → PERBAIKI. Semua butir `$` + lolos +
+patch ≤20 baris + `QWEN_AREA` diisi & tak ada file di luarnya → `VERDIK=LULUS_MESIN` tanpa pemeriksa Qwen (hemat
+±24 giliran). Butir non-`$` dinilai pemeriksa. `⊘`/`!! cek mengubah` = butir brief tak sah → betulkan brief, bukan Qwen.
+v5 otomatis: peta `git grep` kata kunci brief ditempel ke prompt (sebut nama kelas/view/rute/`kode` di brief),
+alat Qwen dipangkas (−23% token/giliran), `METRIK:` per tahap di output (+ `qwen-logs/metrik.csv`).
+**Paralel:** brief kecil yang areanya terpisah → jalankan serentak dengan `QWEN_WORKTREE=1` (worktree sendiri,
+vendor di-clone, hasil diterapkan ke folder asli di akhir; `WORKTREE: ⚠ KONFLIK` → worktree disimpan, revisi
+`QWEN_WORKTREE=<path> qwen-exec eksekusi <SESSION>`). File untracked folder asli tak ikut ke worktree.
 Pagar YOLO (larangan commit/push/destruktif/tulis DB, DB lokal = PROD, tes hanya Unit), baca
 AGENTS.md/QWEN.md, dan format laporan SUDAH ditambah pembungkus — jangan ditulis ulang.
 
@@ -82,12 +101,14 @@ BRIEF
 - Sebelum: catat `git status --short`; bila file sasaran sudah kotor, `git diff -- <file>`
   (pekerjaan pengguna jangan tertimpa/ikut di-commit).
 - **Review Claude = gerbang akhir saja**, berdasarkan VERDIK:
-  - `LULUS` + tak ada ⚠ LUAR → langsung lapor ke pengguna, **tanpa membaca diff** (kecuali tugas sensitif:
+  - `LULUS`/`LULUS_MESIN` + tak ada ⚠ LUAR → langsung lapor ke pengguna, **tanpa membaca diff** (kecuali tugas sensitif:
     lihat cepat `<log>.patch` file kunci saja).
   - `PERLU_CLAUDE` / `PERBAIKI` (putaran habis) / `TAK_TERBACA` / ⚠ LUAR / EXIT≠0 → baca TEMUAN, lalu patch
     file yang disebut saja; putuskan atau tanya pengguna; revisi lewat resume SESSION.
   - Jangan ulang tes yang sudah dijalankan ulang pemeriksa. Verifikasi besar → tahap Qwen terpisah.
 - Jawaban ke pengguna ringkas: hasil, angka kunci, keputusan yang dibutuhkan; tanpa narasi proses.
+  Sebut pelaku dengan jelas: "Qwen dilanjutkan (sesi X)" / "Claude mengerjakan sendiri" — jangan "saya akan
+  melanjutkan" yang ambigu.
 - **QWEN.md tiap proyek ≤ ±5 KB** (Qwen Code memuatnya otomatis tiap giliran, ±20rb token bila
   gemuk). Aturan modul ditaruh di `docs/qwen/<topik>.md` + tabel pemicu di QWEN.md (pola repo pegawai,
   commit 2e8196fb7). Bila menemukan QWEN.md > 5 KB di proyek mana pun → tawarkan pecah via Qwen

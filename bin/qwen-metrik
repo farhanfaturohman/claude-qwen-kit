@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Metrik satu sesi Qwen dari log stream-json (nol token LLM).
+Pakai: qwen-metrik <log.jsonl> <tahap>   → satu baris ringkas ke stdout + satu baris ke metrik.csv
+Kolom: menit, giliran, alat, alat sebelum tulis pertama (ukuran "kebanyakan jelajah"),
+token masuk total, rata-rata per giliran, token giliran pertama (beban tetap: system prompt + alat + QWEN.md).
+"""
+import json, os, sys, time
+
+TULIS = {"edit", "write_file", "notebook_edit"}
+log, tahap = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "-")
+alat = sblm_tulis = 0
+sudah_tulis = False
+giliran1 = None
+hasil = {}
+try:
+    for baris in open(log, errors="replace"):
+        try:
+            d = json.loads(baris)
+        except Exception:
+            continue
+        t = d.get("type")
+        if t == "assistant":
+            m = d.get("message") or {}
+            u = m.get("usage") or {}
+            if giliran1 is None and u.get("input_tokens"):
+                giliran1 = u["input_tokens"]
+            for c in m.get("content") or []:
+                if c.get("type") == "tool_use":
+                    alat += 1
+                    if c.get("name") in TULIS:
+                        sudah_tulis = True
+                    elif not sudah_tulis:
+                        sblm_tulis += 1
+        elif t == "result":
+            hasil = d
+except FileNotFoundError:
+    sys.exit(0)
+
+u = hasil.get("usage") or {}
+gil = hasil.get("num_turns") or 0
+tin = u.get("input_tokens") or 0
+menit = (hasil.get("duration_ms") or 0) / 60000
+k = lambda n: f"{n/1e6:.1f}jt" if n >= 1e6 else f"{n/1e3:.0f}rb"
+tulis = str(sblm_tulis) if sudah_tulis else f"{sblm_tulis}(tak menulis)"
+print(f"{tahap}: {menit:.1f}m · {gil} giliran · {alat} alat · {tulis} alat sblm tulis pertama · "
+      f"token {k(tin)} (rata {k(tin / gil) if gil else '-'}/giliran, giliran-1 {k(giliran1 or 0)})")
+
+if os.environ.get("QWEN_UJI"):
+    sys.exit(0)
+csv = os.path.join(os.path.dirname(os.path.abspath(log)), "metrik.csv")
+KEPALA = "waktu,log,tahap,menit,giliran,alat,alat_sblm_tulis,menulis,token_in,token_giliran1,proyek\n"
+baru = not os.path.exists(csv)
+if not baru:
+    isi = open(csv).read().split("\n", 1)
+    if isi[0] + "\n" != KEPALA:  # kepala versi lama → tambah kolom proyek
+        open(csv, "w").write(KEPALA + (isi[1] if len(isi) > 1 else ""))
+with open(csv, "a") as f:
+    if baru:
+        f.write(KEPALA)
+    f.write(f"{time.strftime('%Y-%m-%d %H:%M')},{os.path.basename(log)},{tahap},{menit:.1f},{gil},{alat},"
+            f"{sblm_tulis},{int(sudah_tulis)},{tin},{giliran1 or 0},{os.environ.get('QWEN_PROYEK') or os.path.basename(os.getcwd())}\n")

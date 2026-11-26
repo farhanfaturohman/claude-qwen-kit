@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""Jalankan butir TITIK CEK yang berupa perintah (diawali '$ ') — dicek mesin, bukan LLM.
+Pakai: qwen-cekmesin <berkas-titik-cek>   (dari folder kerja)
+Cetak 'CEK n: ✓|✗|⊘ $ perintah — keterangan' (n = nomor butir di brief; ⊘ = butir ditolak/tak sah, bukan
+kesalahan pelaksana). Exit 0 = semua ✓, 1 = ada ✗, 2 = galat pembungkus, 3 = tak ada butir '$',
+4 = tak ada ✗ tapi ada ⊘ (brief perlu dibetulkan Claude).
+Pengaman berlapis:
+  1. tolak perintah yang jelas menulis (redirect >, rm/mv/cp/…, sed -i, find -delete, git checkout/…,
+     open(...,'w')/os.remove/file_put_contents…) — dicocokkan di POSISI perintah, bukan di argumen;
+  2. jaga-db (perintah DB berbahaya);
+  3. jaring pengaman: file tracked yang berubah selama cek DIPULIHKAN dari potret sebelum cek, file
+     untracked baru (cache/bytecode) dihapus — cek tak pernah meninggalkan jejak.
+"""
+import json, os, re, shutil, subprocess, sys, tempfile
+
+JAGA = os.path.expanduser("~/.claude/bin/jaga-db")
+AWAL = r"(?:^|[;&|(`]|\$\(|\b(?:sudo|env|xargs|nohup|time|command)\s+)\s*"
+PERINTAH_TULIS = re.compile(AWAL + r"(rm|rmdir|mv|cp|tee|touch|truncate|dd|chmod|chown|ln|mkdir|install|unlink|patch|shred|rsync)\b")
+TULIS_LAIN = re.compile(
+    r"\bsed\s+(-[a-zA-Z]*i|--in-place)|\bperl\s+-[a-zA-Z]*i|\bfind\b.*\s-(delete|exec|execdir|ok|fprint\w*)\b"
+    r"|\bgit\s+(checkout|reset|clean|commit|push|add|rm|mv|restore|switch|merge|rebase|am|tag|cherry-pick|revert|pull|fetch|update-ref|gc|prune)\b"
+    r"|\bgit\s+stash(?!\s+(list|show))\b|\bgit\s+apply(?!\s+(--stat|--check|--numstat|--summary))\b"
+    r"|\bgit\s+worktree\s+(add|remove|prune|move)\b|\bgit\s+branch\s+-[dDmM]"
+    r"|\b(npm|composer|pip3?|yarn|pnpm|brew|apt|apt-get)\s+(install|update|upgrade|remove|require|uninstall|ci|add)\b"
+    r"|\bartisan\s+(make:|vendor:publish|key:|storage:link|optimize|config:cache|route:cache|view:cache|event:cache|cache:clear|queue:)")
+# kode di dalam interpreter (python -c, php -r, node -e …) yang menulis berkas
+KODE_TULIS = re.compile(
+    r"open\([^)]*,\s*['\"][wax]b?\+?['\"]|\.write_(text|bytes)\(|os\.(remove|unlink|rename|replace|rmdir|makedirs|mkdir|system)\b"
+    r"|shutil\.|subprocess\.|file_put_contents|fwrite|unlink\(|rename\(|mkdir\(|rmdir\(|copy\(|touch\(|exec\(|shell_exec|passthru|system\("
+    r"|writeFile|appendFile|rmSync|unlinkSync|mkdirSync|child_process")
+
+
+INTERPRETER = re.compile(r"\b(python[0-9.]*|php|node|ruby|perl|deno|bun)\b[^|;&]*\s-(c|r|e|-eval)\b")
+
+
+def tanpa_kutipan(s):
+    return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "''", s)
+
+
+def alasan_tolak(cmd):
+    c = tanpa_kutipan(cmd)
+    if PERINTAH_TULIS.search(c) or TULIS_LAIN.search(c):
+        return "perintah menulis"
+    for m in re.finditer(r"\d?>{1,2}(?!&)\s*(\S*)", c):
+        if m.group(1) != "/dev/null":
+            return "redirect '>' membuat/menimpa berkas (untuk membandingkan angka pakai test/[ ], mis. [ $(grep -c x f) -ge 1 ])"
+    if INTERPRETER.search(c) and KODE_TULIS.search(cmd):
+        return "kode menulis/menjalankan berkas"
+    return None
+
+
+def jejak(top):
+    """Keadaan file kotor/untracked: {path: (ada, ukuran, mtime_ns, kode)} — -z aman untuk path non-ASCII/berspasi."""
+    r = subprocess.run(["git", "-C", top, "status", "--porcelain=v1", "-z", "-uall"], capture_output=True, text=True)
+    hasil, bag = {}, r.stdout.split("\0")
+    i = 0
+    while i < len(bag):
+        e = bag[i]; i += 1
+        if len(e) < 4:
+            continue
+        kode, f = e[:2], e[3:]
+        if kode[0] in "RC":
+            i += 1  # entri rename membawa path asal di elemen berikutnya
+        p = os.path.join(top, f)
+        try:
+            st = os.lstat(p); hasil[f] = (True, st.st_size, st.st_mtime_ns, kode.strip() or kode)
+        except OSError:
+            hasil[f] = (False, 0, 0, kode.strip() or kode)
+    return hasil
+
+
+def hapus_dir_kosong(top, p):
+    d = os.path.dirname(p)
+    while d.startswith(top + os.sep) and os.path.isdir(d) and not os.listdir(d):
+        os.rmdir(d); d = os.path.dirname(d)
+
+
+def git(*a):
+    return subprocess.run(["git", *a], capture_output=True, text=True)
+
+
+def utama():
+    try:
+        teks = open(sys.argv[1], errors="replace").read()
+    except (IndexError, OSError) as e:
+        print(f"cekmesin: berkas titik cek tak terbaca ({e})"); return 2
+    try:
+        detik = int(os.environ.get("QWEN_CEK_DETIK", "120"))
+    except ValueError:
+        detik = 120
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    digit = git("rev-parse", "--is-inside-work-tree").returncode == 0
+    if digit:
+        top = git("rev-parse", "--show-toplevel").stdout.strip()
+        ada_head = git("-C", top, "rev-parse", "--verify", "-q", "HEAD").returncode == 0
+        try:
+            t0 = float(os.environ.get("QWEN_T0", "0"))
+        except ValueError:
+            t0 = 0.0
+        simpan = tempfile.mkdtemp(prefix="cekmesin-")
+        jejak0 = jejak(top)            # {path: (ada, ukuran, mtime_ns, kode_status)}
+        salinan = {}
+        for f, (ada, uk, mt, kode) in jejak0.items():
+            # salin isi: tracked yang kotor (sedikit) + untracked baru sesi ini (hasil pelaksana); untracked lama → sidik saja
+            if ada and uk <= 20_000_000 and (kode != "??" or mt / 1e9 >= t0):
+                d = os.path.join(simpan, str(len(salinan)))
+                shutil.copy2(os.path.join(top, f), d); salinan[f] = d
+        untracked0 = set(git("-C", top, "ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0")) - {""}
+    ada_cmd = gagal = tolak = False
+    no = 0
+    for l in teks.splitlines():
+        if not l.strip():
+            continue
+        m = re.match(r"^\s*(?:(\d+)[.)]|([-*•]))?\s*(\$\s+)?(.*)$", l)
+        angka, tanda, dolar, isi = m.groups()
+        if angka:
+            no = int(angka)
+        elif tanda or (dolar and no == 0):
+            no += 1
+        if not dolar:
+            continue
+        ada_cmd = True
+        cmd = isi.strip()
+        why = alasan_tolak(cmd)
+        if why:
+            print(f"CEK {no}: ⊘ $ {cmd} — DITOLAK ({why}); cek mesin hanya perintah baca — butir ini perlu dibetulkan di brief")
+            tolak = True; continue
+        if os.path.exists(JAGA):
+            j = subprocess.run([JAGA], input=json.dumps({"tool_input": {"command": cmd}}), capture_output=True, text=True)
+            if j.returncode == 2:
+                print(f"CEK {no}: ⊘ $ {cmd} — DITOLAK jaga-db"); tolak = True; continue
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=detik, env=env)
+            out = (r.stdout + r.stderr).strip().splitlines()
+            ok, ket = r.returncode == 0, f"exit {r.returncode}" + (f": {out[-1][:140]}" if out else "")
+        except subprocess.TimeoutExpired:
+            ok, ket = False, f"waktu habis {detik} dtk"
+        gagal |= not ok
+        print(f"CEK {no}: {'✓' if ok else '✗'} $ {cmd} — {ket}")
+    # jaring pengaman: kembalikan keadaan seperti sebelum cek
+    if digit:
+        jejak1 = jejak(top)
+        for f in sorted(set(jejak0) | set(jejak1)):
+            p = os.path.join(top, f)
+            sebelum, sesudah = jejak0.get(f), jejak1.get(f)
+            if sebelum is None:
+                # tadinya bersih (identik HEAD) atau belum ada
+                isi = subprocess.run(["git", "-C", top, "show", f"HEAD:{f}"], capture_output=True) if ada_head else None
+                if isi is not None and isi.returncode == 0:
+                    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+                    open(p, "wb").write(isi.stdout)
+                    print(f"!! cek mengubah {f} — DIPULIHKAN (butir cek menulis: betulkan brief)"); tolak = True
+                elif os.path.lexists(p) and (sesudah or ("", 0, 0, ""))[3] == "??":
+                    os.remove(p); hapus_dir_kosong(top, p)   # sampingan cek (cache/bytecode)
+                continue
+            if sebelum[:3] == (sesudah or (False, 0, 0))[:3]:
+                continue
+            if f in salinan:
+                os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+                shutil.copy2(salinan[f], p)
+                print(f"!! cek mengubah {f} — DIPULIHKAN dari salinan sebelum cek (butir cek menulis: betulkan brief)"); tolak = True
+            elif not sebelum[0] and os.path.lexists(p):
+                os.remove(p)
+            else:
+                print(f"!! cek mengubah {f} (untracked lama/besar, TAK BISA dipulihkan) — periksa manual"); tolak = True
+        shutil.rmtree(simpan, ignore_errors=True)
+    if not ada_cmd:
+        return 3
+    return 1 if gagal else (4 if tolak else 0)
+
+
+try:
+    sys.exit(utama())
+except SystemExit:
+    raise
+except Exception as e:  # galat pembungkus ≠ cek gagal
+    print(f"cekmesin: galat {type(e).__name__}: {e}"); sys.exit(2)

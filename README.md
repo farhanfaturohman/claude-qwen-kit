@@ -62,6 +62,37 @@ Claude Code di server — Claude menjalankan semua langkah di atas.
 | `QWEN_RINGAN` | — | `1` = cek cepat tanpa baca AGENTS/QWEN.md & tanpa verifikasi |
 | `QWEN_EKOR` | `1500` | byte tiap bagian laporan yang dicetak |
 
+**TITIK CEK di brief:** bagian berjudul `TITIK CEK:` (diakhiri baris kosong) berisi 2–6 butir terukur.
+Pelaksana melapor `CEK n: ✓/✗ — bukti`, dan pemeriksa wajib menilai setiap butir. Satu ✗ memaksa
+perbaikan otomatis walau pemeriksa menulis LULUS. Keluarannya memuat `TITIK_CEK (pemeriksa terakhir): a ✓ · b ✗ dari n titik`.
+Butir yang diawali `$ ` (misalnya `1. $ grep -q x path`) **dijalankan mesin** (`bin/qwen-cekmesin`,
+lewat jaga-db dulu), dan ✗ memaksa perbaikan. Kalau semua butir berupa `$`, semuanya lolos, dan patch
+≤ `QWEN_SEPELE_BARIS` (bawaan 20) baris, hasilnya `VERDIK=LULUS_MESIN` tanpa sesi pemeriksa Qwen. Jalur
+pintas ini hanya berlaku bila `QWEN_AREA` diisi dan semua file yang berubah ada di dalam area tersebut
+(cache atau bytecode diabaikan).
+Cek mesin hanya menerima perintah **baca**. Perintah yang menulis (redirect `>`, `rm`, `sed -i`,
+`find -delete`, `os.remove` di `python -c`, dll.) ditandai `⊘`. Tanda ini berarti brief yang perlu
+dibetulkan; tidak memaksa perbaikan. Ada juga jaring pengaman: file kotor dan file baru dari sesi itu
+disalin sebelum cek, file bersih dipulihkan dari HEAD, dan sampingan cek dihapus. Hasilnya, cek tidak
+pernah merusak pekerjaan (teruji juga saat ada `index.lock`). File untracked lama milik pengguna hanya
+diberi peringatan `!!` bila berubah.
+
+**v5, otomatis di setiap panggilan:**
+- **Peta otomatis** (`bin/qwen-peta`, tanpa LLM): `git grep` untuk path, kelas, view, rute, dan `kode` yang
+  disebut di brief. Hasilnya berupa file:baris yang ditempel ke prompt, jadi Qwen tidak perlu menjelajah.
+  Matikan dengan `QWEN_PETA=0`.
+- **Alat ramping**: alat non-kode (cron, agent, web, memori, dll.) dibuang, sehingga sekitar 31 alat menjadi 8.
+  Token per giliran turun sekitar 23% (terukur 16,2rb → 12,5rb). `QWEN_ALAT=penuh` mengembalikannya.
+- **Metrik** (`bin/qwen-metrik`): baris `METRIK:` per tahap di keluaran berisi menit, giliran, alat, alat
+  sebelum tulis pertama, dan token. Riwayatnya ada di `~/.claude/qwen-logs/metrik.csv`.
+- **Mode worktree** `QWEN_WORKTREE=1`: Qwen bekerja di git worktree terpisah. Basisnya working tree saat ini
+  (termasuk perubahan yang belum di-commit), vendor di-clone, dan `.env` di-symlink. Di akhir, patch
+  diterapkan ke folder asli. Kalau konflik, folder asli tidak disentuh dan worktree disimpan untuk revisi
+  (`QWEN_WORKTREE=<path>`). Cocok untuk menjalankan beberapa brief kecil serentak. File untracked tidak ikut.
+
+Pelaksana juga diarahkan kerja cepat: langsung ke file sasaran, jelajah ±8 baca, dan menyimpan bertahap
+supaya hasil parsial tetap ada walau waktu habis.
+
 **Judul tab terminal:** selama Qwen yang diluncurkan sesi Claude itu berjalan, judul tab menjadi
 `⏳ Qwen <tahap> <durasi> · <proyek>`; setelah selesai kembali `✳ <proyek>`. Hanya tab pemilik sesi
 yang berubah. Matikan dengan `"env": {"QWEN_JUDUL": "0"}` di `~/.claude/settings.json`.

@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Peta otomatis tanpa LLM: ambil kata kunci dari brief (stdin), cari lokasinya di repo (git grep),
+cetak daftar file:baris singkat untuk ditempel ke prompt Qwen supaya Qwen tak perlu menjelajah.
+Pakai: qwen-peta < brief.txt   (dari folder kerja)   · Batas: QWEN_PETA_BARIS (bawaan 40)
+"""
+import os, re, subprocess, sys
+
+brief = sys.stdin.read()
+MAKS = int(os.environ.get("QWEN_PETA_BARIS", "40"))
+UMUM = 25          # kata kunci yang muncul di > UMUM file dianggap terlalu umum
+EKS = r"(?:blade\.php|php|js|ts|vue|css|scss|json|py|sh|yml|yaml|sql|md|xml|dart)"
+ABAI = ("vendor/", "node_modules/", "storage/", "public/build", "public/vendor", "bootstrap/cache", ".min.")
+digit = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True).returncode == 0
+ROOT = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip() if digit else os.getcwd()
+STOP = set("""TITIK CEK SASARAN BRIEF TUJUAN AREA TES KENDALA LULUS PERBAIKI VERDIK FILE_DIUBAH JANGAN Unit
+README AGENTS QWEN CLAUDE phpunit testsuite artisan TODO JSON HTML CSS PHP SQL HTTP GET POST""".split())
+
+def ada(p):
+    for base in (os.getcwd(), ROOT):
+        q = os.path.join(base, p)
+        if os.path.isfile(q):
+            return os.path.relpath(q, os.getcwd())
+    return None
+
+keluaran, terlihat, kata = [], set(), []
+
+# 1) path yang disebut langsung (boleh dengan :baris)
+for m in re.finditer(rf"([\w@.\-/]+\.{EKS})(?::(\d+)(?:[-–]\d+)?)?", brief):
+    p, bar = m.group(1), m.group(2)
+    q = ada(p)
+    if q and q not in terlihat:
+        terlihat.add(q)
+        n = sum(1 for _ in open(q, errors="replace"))
+        keluaran.append(f"- {q}{':' + bar if bar else ''} (ada, {n} baris)")
+    elif not q:
+        # nama file tanpa folder → cari lewat git ls-files
+        if digit and "/" not in p:
+            r = subprocess.run(["git", "ls-files", "--", f"*{p}"], capture_output=True, text=True, timeout=10)
+            for f in r.stdout.split()[:3]:
+                q = os.path.relpath(os.path.join(ROOT, f), os.getcwd())
+                if q not in terlihat:
+                    terlihat.add(q); keluaran.append(f"- {q} (cocok nama '{p}')")
+
+# 2) nama view bertitik → path blade
+for m in re.finditer(r"['\"`]?([a-z][\w-]*(?:\.[a-z][\w-]*)+)['\"`]?", brief):
+    v = m.group(1)
+    if re.search(rf"\.{EKS}$", v):
+        continue
+    q = ada("resources/views/" + v.replace(".", "/") + ".blade.php")
+    if q and q not in terlihat:
+        terlihat.add(q); keluaran.append(f"- {q} (view '{v}')")
+
+# 3) kata kunci: `kode`, CamelCase, snake_case, kebab-case, rute /a-b
+def tambah(k):
+    k = k.strip("`'\". ,;:()")
+    if len(k) >= 5 and k not in STOP and k not in kata and not re.search(rf"\.{EKS}$", k):
+        kata.append(k)
+for m in re.findall(r"`([^`\n]{4,60})`", brief):
+    if not re.search(r"\s", m.strip()):
+        tambah(m)
+for m in re.findall(r"\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b", brief):
+    tambah(m)
+for m in re.findall(r"(?:->|::)(\w{4,})\(", brief):
+    tambah(m)
+for m in re.findall(r"\b([a-z][a-z0-9]+(?:_[a-z0-9]+)+)\b", brief):
+    tambah(m)
+for m in re.findall(r"(?<![\w/.])(/[a-z0-9][a-z0-9-]+(?:/[a-z0-9{}-]+)*)", brief):
+    if "-" in m or m.count("/") >= 2:
+        tambah(m.split("/")[1] if m.startswith("/") else m)
+for m in re.findall(r"\b([a-z]+(?:-[a-z0-9]+)+)\b", brief):
+    tambah(m)
+kata = kata[:12]
+
+def cari(k):
+    if digit:
+        cmd = ["git", "grep", "--untracked", "-n", "-I", "-F", "--max-count", "3", "-e", k, "--", "."] + [f":!{a.rstrip('/')}" for a in ABAI if not a.startswith(".")]
+    else:
+        cmd = ["grep", "-rnIF", "-m", "3", "--exclude-dir=vendor", "--exclude-dir=node_modules", "--exclude-dir=storage", "--exclude-dir=.git", k, "."]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except Exception:
+        return []
+    return [l for l in r.stdout.splitlines() if not any(a in l.split(":", 1)[0] for a in ABAI)]
+
+umum = []
+for k in kata:
+    hits = cari(k)
+    if not hits:
+        continue
+    files = []
+    for l in hits:
+        f = l.split(":", 1)[0]
+        if f not in files:
+            files.append(f)
+    if len(files) > UMUM:
+        umum.append(f"{k}({len(files)} file)"); continue
+    keluaran.append(f"• '{k}' — {len(files)} file:")
+    for l in hits[:6]:
+        f, rest = l.split(":", 1)
+        bar, _, isi = rest.partition(":")
+        keluaran.append(f"  {f}:{bar}  {isi.strip()[:110]}")
+    if len(keluaran) >= MAKS:
+        break
+
+if umum:
+    keluaran.append("(terlalu umum, tak dipetakan: " + ", ".join(umum[:6]) + ")")
+if any(not l.startswith("(") for l in keluaran):
+    print("\n".join(keluaran[:MAKS]))

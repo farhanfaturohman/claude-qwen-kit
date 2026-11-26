@@ -11,6 +11,13 @@
 #   QWEN_PROGRESS=<file>       file progres (untuk Monitor qwen-awasi)
 #   QWEN_PERBAIKAN=baru|lanjut perbaikan otomatis di sesi baru (bawaan, ringan) atau lanjut sesi pelaksana
 #   QWEN_ULANG_JARINGAN=N      ulang otomatis bila putus jaringan (bawaan 1; jeda QWEN_JEDA_ULANG=60 dtk)
+#   QWEN_PETA=0                matikan peta otomatis (git grep kata kunci brief → file:baris di prompt)
+#   QWEN_ALAT=penuh            jangan pangkas alat Qwen (bawaan: hanya baca/cari/edit/tulis/shell)
+#   QWEN_WORKTREE=1            kerja di git worktree terpisah (paralel aman), hasil diterapkan ke folder asli
+#   QWEN_WORKTREE=<path>       pakai ulang worktree yang disimpan (revisi/resume)
+#   QWEN_SEPELE_BARIS=N        perubahan ≤N baris + semua TITIK CEK '$ perintah' lolos → tanpa pemeriksa Qwen (bawaan 20; 0=mati)
+# v5 (2026-11-26): TITIK CEK (✗ memaksa PERBAIKI), cek mesin '$ perintah', peta otomatis, alat ramping,
+#   metrik per tahap (metrik.csv), mode worktree.
 # v4 (2026-11-24): pagar di --append-system-prompt (tahan ringkasan konteks & resume).
 # Seluruh isi dibungkus fungsi utama(): zsh mengurai SEMUANYA sebelum jalan, jadi menyunting file
 # ini saat ada sesi berjalan tak lagi memicu "parse error" di tengah jalan (insiden 2026-11-24).
@@ -26,27 +33,43 @@ SID="${RESUME:-$(uuid_baru)}"
 STAMP=$(date +%Y%m%d-%H%M%S)-${SID[1,8]}
 LOGDIR=~/.claude/qwen-logs
 LOG=$LOGDIR/$STAMP.jsonl
+CEKF=$LOG.cek
 PROG="${QWEN_PROGRESS:-$LOGDIR/$STAMP.progress}"
 : > "$PROG"
-{ echo "· DIR $PWD"; echo "· T0 $(date +%s)"; [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] && echo "· CC $CLAUDE_CODE_SESSION_ID"; } >> "$PROG"   # untuk qwen-status (status line + judul ⏳)
+T0=$(date +%s)
+{ echo "· DIR $PWD"; echo "· T0 $T0"; [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] && echo "· CC $CLAUDE_CODE_SESSION_ID"; } >> "$PROG"   # untuk qwen-status (status line + judul ⏳)
 SELESAI_TULIS=0
 # Penanda akhir dijamin ada walau gagal/dihentikan, supaya qwen-awasi & Claude tahu sesi berakhir.
-selesai_darurat() { [[ $SELESAI_TULIS == 1 ]] || { SELESAI_TULIS=1; echo "■ SELESAI EXIT=$1 VERDIK=${2:-GAGAL_PEMBUNGKUS} session=$SID" >> "$PROG"; }; }
+selesai_darurat() {
+  [[ $SELESAI_TULIS == 1 ]] && return
+  SELESAI_TULIS=1; echo "■ SELESAI EXIT=$1 VERDIK=${2:-GAGAL_PEMBUNGKUS} session=$SID" >> "$PROG"
+  [[ -n "${WT:-}" && -d "${WT:-}" ]] && { echo "⚠ worktree disimpan (hasil BELUM diterapkan): $WT" >> "$PROG"
+    echo "WORKTREE: ⚠ dihentikan — hasil BELUM diterapkan; worktree disimpan: $WT — lanjut: QWEN_WORKTREE=$WT qwen-exec eksekusi $SID"; }
+}
+gagal_awal() { echo "SESSION=$SID EXIT=2 VERDIK=GAGAL_PEMBUNGKUS PUTARAN_PERBAIKAN=0 LOG=$LOG"; echo "!! $1"; selesai_darurat 2 GAGAL_PEMBUNGKUS; }
 trap 'selesai_darurat $? GAGAL_PEMBUNGKUS' EXIT
 trap 'selesai_darurat 143 DIHENTIKAN; exit 143' TERM INT HUP
 EKOR="${QWEN_EKOR:-1500}"
 VERIF="${QWEN_VERIFIKASI:-1}"; PUTARAN="${QWEN_PUTARAN:-1}"
 [[ "$TAHAP" == kritik || -n "${QWEN_RINGAN:-}" ]] && VERIF=0
+# Titik cek dari brief: bagian "TITIK CEK:" (atau KEYPOINT/CHECKPOINT) sampai baris kosong / header KAPITAL berikutnya.
+CEK="$(print -r -- "$BRIEF" | awk '{l=tolower($0)} f && (/^[[:space:]]*$/ || /^[A-Za-z][A-Za-z_ -]*:/) {exit} f {print} l ~ /^[[:space:]]*(titik[ _]cek|keypoints?|checkpoints?)[[:space:]]*(:|$)/ {f=1}')"
+ARTEFAK='(^|/)(__pycache__|\.pytest_cache|\.phpunit\.cache)/|\.pyc$|(^|/)(\.phpunit\.result\.cache|\.DS_Store)$'   # sampingan tes/bytecode
+N_CEK=$(print -r -- "$CEK" | grep -c '[^[:space:]]')
+N_CMD=$(print -r -- "$CEK" | grep -cE '^[[:space:]]*([0-9]+[.)]|[-*•])?[[:space:]]*\$[[:space:]]+')   # butir '$ perintah' = dicek mesin
 
 FORMAT_EKS="LAPORAN AKHIR (ringkas, maks ±25 baris; rincian panjang tulis ke berkas lalu rujuk path-nya), format persis:
 FILE_DIUBAH: - path — apa yang berubah (satu baris per file)
 TES: perintah — LULUS/GAGAL (tempel hanya log kegagalan, bukan log yang lulus)
 KENDALA: hal yang belum selesai/ragu, atau '-'"
+[[ -n "$CEK" ]] && FORMAT_EKS="$FORMAT_EKS
+TITIK_CEK: satu baris per titik cek brief → 'CEK n: ✓ atau ✗ — bukti singkat (perintah+hasil / path:baris)'"
 if [[ "$TAHAP" == kritik ]]; then
   PERAN="TAHAP: KRITIK READ-ONLY. Hanya baca dan nilai. DILARANG mengubah, membuat, atau menghapus file apa pun dan dilarang menjalankan perintah yang mengubah keadaan."
   LAPOR="LAPORAN AKHIR (ringkas, maks ±25 baris; rincian panjang tulis ke berkas lalu rujuk path-nya): RISIKO, KEKURANGAN, USULAN KOREKSI, PERLU KEPUTUSAN PENGGUNA. Sertakan path:baris bila relevan."
 else
-  PERAN="TAHAP: EKSEKUSI. Kerjakan langsung sesuai brief. Jangan memanggil agen/Codex/Claude/Qwen lain dan jangan mendelegasikan ulang. Hasilmu akan diperiksa pemeriksa independen: jalankan sendiri tes yang relevan sebelum melapor."
+  PERAN="TAHAP: EKSEKUSI. Kerjakan langsung sesuai brief. Jangan memanggil agen/Codex/Claude/Qwen lain dan jangan mendelegasikan ulang. Hasilmu akan diperiksa pemeriksa independen: jalankan sendiri tes yang relevan sebelum melapor.
+KERJA CEPAT: (a) bila brief menyebut file/path sasaran, langsung buka itu dan jangan menjelajah modul lain (patokan ≤8 baca/cari sebelum perubahan pertama; butuh lebih berarti brief kurang jelas → kerjakan yang pasti, sisanya tulis di KENDALA). (b) Kerjakan & SIMPAN bertahap per langkah/titik cek, jangan menumpuk sampai akhir — batas sesi ±${QWEN_MAX_WALL:-20m}; bila habis, hasil parsial tetap terpakai. (c) Jangan membaca ulang file yang sudah dibaca.${CEK:+ (d) Brief memuat TITIK CEK: itu definisi selesai — penuhi semuanya dan buktikan satu per satu.}"
   LAPOR="$FORMAT_EKS
 Jika brief bermasalah atau butuh keputusan pengguna/melebihi batas: BERHENTI tanpa mengubah apa pun dan laporkan di KENDALA."
 fi
@@ -67,11 +90,19 @@ jalankan() {
   local args=(--yolo --advisor off --output-format stream-json --max-wall-time "${QWEN_MAX_WALL:-20m}" --max-session-turns "${QWEN_MAX_TURNS:-60}" --max-tool-calls "${QWEN_MAX_TOOLS:-250}")
   if [[ "$3" == 1 ]]; then args+=(--resume "$2"); else args+=(--session-id "$2"); fi
   # Kritik/verifikasi: plan mode memblokir read_file/grep di headless, jadi --yolo tanpa alat tulis.
-  [[ "$1" == kritik ]] && args+=(--exclude-tools edit write_file notebook_edit)
+  # Alat ramping: alat non-kode (cron/agent/web/memori/worktree…) ikut terkirim tiap giliran (±3,7rb token) & mengalihkan.
+  local buang=()
+  [[ "${QWEN_ALAT:-ramping}" != penuh ]] && buang=(read_mcp_resource zoom_image cron_list cron_delete cron_create autofix_pr web_fetch list_agents task_stop skill search_memory enter_worktree exit_worktree record_artifact get_goal update_goal agent report_findings loop_wakeup monitor send_message manage_memory notebook_edit)
+  [[ "$1" == kritik ]] && buang+=(edit write_file)
+  [[ "$1" == kritik && "${QWEN_ALAT:-ramping}" == penuh ]] && buang+=(notebook_edit)
+  (( ${#buang} )) && args+=(--exclude-tools "${buang[@]}")
   args+=(--append-system-prompt "$PAGAR")
   QWEN_CODE_SUPPRESS_YOLO_WARNING=1 qwen "$4" "${args[@]}" 2>>"$PROG" \
     | python3 ~/.claude/bin/qwen-saring.py "$5" "$PROG" > "$5.laporan"
-  return ${pipestatus[1]}
+  local rc=${pipestatus[1]} mt
+  mt=$(QWEN_PROYEK=${ASLI_PWD:t} python3 ~/.claude/bin/qwen-metrik "$5" "${LABEL:-$1}" 2>/dev/null)
+  [[ -n "$mt" ]] && { echo "· METRIK $mt" >> "$PROG"; print -r -- "$mt" >> "$LOGDIR/$STAMP.metrik"; }
+  return $rc
 }
 JARINGAN='Connection error|ENOTFOUND|EHOSTUNREACH|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|terminated|No stream activity|fetch failed'
 # jalankan_tahan: seperti jalankan, tapi bila gagal karena jaringan → jeda lalu lanjutkan sesi yang sama
@@ -87,6 +118,34 @@ jalankan_tahan() {
   done
   return $rc
 }
+
+# ---------- mode worktree (opsional): kerja terpisah, hasil diterapkan ke folder asli di akhir ----------
+WT=""; WT_BASE=""; ASLI_TOP=""; ASLI_PWD=$PWD
+if [[ -n "${QWEN_WORKTREE:-}" && "${QWEN_WORKTREE}" != 0 ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  REL=$(git rev-parse --show-prefix)
+  if [[ "$QWEN_WORKTREE" == 1 ]]; then
+    ASLI_TOP=$(git rev-parse --show-toplevel)
+    WT=$LOGDIR/wt/$STAMP; mkdir -p "$LOGDIR/wt"
+    WT_BASE=$(git stash create 2>/dev/null); [[ -z "$WT_BASE" ]] && WT_BASE=$(git rev-parse HEAD)   # termasuk perubahan tracked yang belum di-commit
+    git worktree add -q --detach "$WT" "$WT_BASE" >>"$PROG" 2>&1 || { WT=""; gagal_awal "gagal membuat worktree (lihat $PROG)"; return 2; }
+    # berkas gitignored yang dibutuhkan untuk menjalankan kode/tes
+    [[ -e "$ASLI_TOP/.env" ]] && ln -s "$ASLI_TOP/.env" "$WT/.env"
+    if [[ -d "$ASLI_TOP/vendor" && -z "$(git -C "$ASLI_TOP" ls-files vendor | head -1)" ]]; then   # SALIN (clone APFS/reflink), bukan symlink: autoload composer relatif → kode worktree yang dipakai
+      cp -cR "$ASLI_TOP/vendor" "$WT/vendor" 2>/dev/null || cp -R --reflink=auto "$ASLI_TOP/vendor" "$WT/vendor" 2>/dev/null \
+        || { ln -s "$ASLI_TOP/vendor" "$WT/vendor"; echo "⚠ vendor di-symlink (salin gagal): autoload bisa menunjuk kode folder asli" >> "$PROG"; }
+    fi
+    if [[ -d "$ASLI_TOP/node_modules" ]]; then ln -s "$ASLI_TOP/node_modules" "$WT/node_modules"; git -C "$WT" check-ignore -q node_modules || rm -f "$WT/node_modules"; fi
+    print -r -- "$WT_BASE" > "$WT.base"; print -r -- "$ASLI_TOP" > "$WT.asli"
+    git update-ref "refs/qwen-wt/${WT:t}" "$WT_BASE"   # basis (objek stash) tak di-prune git gc
+  else
+    WT=${QWEN_WORKTREE%/}
+    [[ -f "$WT.base" && -d "$WT" ]] || { local w=$WT; WT=""; gagal_awal "worktree $w tidak ditemukan"; return 2; }
+    WT_BASE=$(cat "$WT.base"); ASLI_TOP=$(cat "$WT.asli")
+    if [[ "$PWD" == "$WT" || "$PWD" == "$WT"/* ]]; then REL=${PWD#$WT}; REL=${REL#/}; fi
+  fi
+  cd "$WT/$REL" || { gagal_awal "tak bisa masuk $WT/$REL"; return 2; }
+  echo "· WORKTREE $WT (basis ${WT_BASE[1,10]}; file untracked folder asli tidak ikut)" >> "$PROG"
+fi
 
 # ---------- potret working tree ----------
 DIGIT=0; git rev-parse --is-inside-work-tree >/dev/null 2>&1 && DIGIT=1
@@ -123,13 +182,23 @@ buat_patch() {  # $1 = berkas keluaran
 
 # ---------- 1. eksekusi / kritik ----------
 PENGINGAT="(Patuhi ATURAN MUTLAK di system prompt: area brief saja, tanpa commit/tulis DB/perintah destruktif.)"
+[[ -n "$CEK" ]] && print -r -- "$CEK" > "$CEKF"
+PETA=""
+if [[ -z "${QWEN_RINGAN:-}" && "${QWEN_PETA:-1}" != 0 && -z "$RESUME" ]]; then
+  PETA=$(print -r -- "$BRIEF" | python3 ~/.claude/bin/qwen-peta 2>/dev/null)
+  [[ -n "$PETA" ]] && { print -r -- "$PETA" > "$LOG.peta"; echo "· PETA $(print -r -- "$PETA" | wc -l | tr -d ' ') baris → $LOG.peta" >> "$PROG"; }
+fi
 PROMPT="$PERAN
 $PENGINGAT
 
 BRIEF:
 $BRIEF
-
+${PETA:+
+PETA OTOMATIS (hasil git grep kata kunci brief oleh pembungkus — titik awal, bisa tak lengkap; jangan menjelajah ulang yang sudah tertera):
+$PETA
+}
 $LAPOR"
+LABEL=$([[ $TAHAP == kritik ]] && echo kritik || echo pelaksana)
 echo "▶ MULAI tahap=$TAHAP session=$SID" >> "$PROG"
 jalankan_tahan "$TAHAP" "$SID" "$([[ -n $RESUME ]] && echo 1 || echo 0)" "$PROMPT" "$LOG"; RC=$?
 SID_AKHIR=$SID
@@ -140,10 +209,23 @@ if [[ $VERIF == 1 && $RC == 0 ]]; then
   while true; do
     PATCH=$LOG.patch; buat_patch "$PATCH"
     if [[ $DIGIT == 1 && ! -s "$PATCH" ]]; then VERDIK="TANPA_PERUBAHAN"; break; fi
+    MESIN=""; MESIN_RC=3; MESIN_X=""
+    if [[ $N_CMD -gt 0 ]]; then
+      QWEN_T0=$T0 python3 ~/.claude/bin/qwen-cekmesin "$CEKF" > "$LOG.cekmesin$PUT" 2>&1; MESIN_RC=$?
+      MESIN=$(cat "$LOG.cekmesin$PUT"); MESIN_X=$(print -r -- "$MESIN" | grep '✗')
+      MESIN_OK=$(print -r -- "$MESIN" | grep -c '✓'); MESIN_NX=$(print -r -- "$MESIN" | grep -c '✗')
+      echo "· CEK_MESIN putaran=$PUT: $MESIN_OK ✓ · $MESIN_NX ✗ (rc=$MESIN_RC)" >> "$PROG"
+      BARIS_UBAH=$(grep -E '^[+-]' "$PATCH" | grep -vcE '^(\+\+\+|---) ')
+      LUAR_N=1; [[ -n "${QWEN_AREA:-}" ]] && LUAR_N=$(berubah | grep -vE -- "$ARTEFAK" | grep -vEc -- "$QWEN_AREA")
+      grep -E '^Binary files' "$PATCH" | grep -vqE -- "$ARTEFAK" && LUAR_N=1   # biner selain artefak → tak sepele
+      if [[ $MESIN_RC == 0 && $N_CMD == $N_CEK && $DIGIT == 1 && $LUAR_N == 0 && ${QWEN_SEPELE_BARIS:-20} != 0 && $BARIS_UBAH -le ${QWEN_SEPELE_BARIS:-20} ]]; then
+        VERDIK="LULUS_MESIN"; echo "· VERIFIKASI Qwen dilewati: perubahan sepele ($BARIS_UBAH baris) & semua titik cek mesin ✓" >> "$PROG"; break
+      fi
+    fi
     VSID=$(uuid_baru); VLOG=$LOGDIR/$STAMP-verif$PUT.jsonl
     if [[ $DIGIT == 1 ]]; then SUMBER="PATCH perubahan sesi ini (hanya perubahan pelaksana, bukan perubahan pengguna sebelumnya): $PATCH — baca utuh; boleh baca kode sekitar untuk konteks."
     else SUMBER="Folder ini bukan repo git (tak ada patch). Periksa langsung file yang disebut di laporan pelaksana."; fi
-    echo "▶ VERIFIKASI putaran=$PUT session=$VSID" >> "$PROG"
+    echo "▶ VERIFIKASI putaran=$PUT session=$VSID" >> "$PROG"; LABEL=pemeriksa$PUT
     jalankan_tahan kritik "$VSID" 0 "TAHAP: VERIFIKASI INDEPENDEN READ-ONLY. Kamu pemeriksa, bukan pelaksana; jangan mengubah file apa pun. Jangan percaya laporan pelaksana begitu saja.
 $PENGINGAT
 
@@ -154,18 +236,32 @@ LAPORAN PELAKSANA (ekor):
 $(tail -c 3000 "$LOG.laporan")
 
 $SUMBER
-
+${CEK:+
+TITIK CEK dari Claude (WAJIB diperiksa satu per satu, jangan dilewati):
+$CEK
+Untuk tiap titik tulis baris 'CEK n: ✓ — bukti' atau 'CEK n: ✗ — masalah' (jalankan perintahnya bila aman, atau kutip path:baris). Satu saja ✗ berarti bukan LULUS.
+}${MESIN:+
+HASIL CEK MESIN oleh pembungkus (objektif; butir '\$ perintah' sudah dijalankan — tak perlu diulang, cukup nilai sisanya):
+$MESIN
+}
+Fokus pada file di patch, titik cek, dan kriteria brief; jangan menjelajah modul yang tidak disentuh.
 Periksa: (1) setiap kriteria/tujuan brief benar-benar terpenuhi; (2) bug, regresi, kasus tepi, error sintaks; (3) perubahan di luar brief atau menimpa pekerjaan pengguna; (4) klaim TES — jalankan ulang tes yang relevan bila aman (hanya yang tidak menulis DB); (5) untuk dokumen/data: angka/isi tidak hilang atau berubah makna.
 Jawab PERSIS format ini (maks ±20 baris):
 VERDIK: LULUS | PERBAIKI | PERLU_CLAUDE
 ALASAN: 1–3 baris
 TEMUAN: - path:baris — masalah — koreksi yang diminta (maks 10; '-' bila tidak ada)
-CATATAN: saran mutu kecil yang tidak wajib (maks 3; '-' bila tidak ada)
+CATATAN: saran mutu kecil yang tidak wajib (maks 3; '-' bila tidak ada)${CEK:+
+CEK n: ✓/✗ — bukti (satu baris per titik cek)}
 Pakai PERLU_CLAUDE bila: butuh keputusan pengguna, menyentuh perhitungan uang/nilai/autentikasi/skema DB dan ada keraguan, atau kamu tidak yakin. Pakai PERBAIKI hanya untuk masalah nyata yang bisa diperbaiki pelaksana: melanggar brief, bug/kasus tepi yang salah, keamanan, tes yang mengunci nilai salah. Saran mutu kecil (penamaan, tes bisa lebih ketat, gaya) TIDAK membuat PERBAIKI — tulis di baris CATATAN: dan tetap LULUS.
 Jangan membuka koneksi basis data (getPdo, tinker, query) untuk memeriksa — cukup baca kode.
 Setiap TEMUAN wajib berbukti (kutip baris kode atau hasil eksekusi). Klaim tentang perilaku framework/library WAJIB dicek dulu terhadap pemakaian yang sudah ada di repo: bila pola yang sama sudah dipakai dan berjalan di tempat lain, itu bukan bug. Temuan yang tak bisa kamu buktikan → CATATAN, bukan TEMUAN." "$VLOG"
     VERDIK=$(grep -oE 'VERDIK:[[:space:]]*\**[[:space:]]*(LULUS|PERBAIKI|PERLU_CLAUDE)' "$VLOG.laporan" | tail -1 | grep -oE 'LULUS|PERBAIKI|PERLU_CLAUDE')
     [[ -z "$VERDIK" ]] && VERDIK="TAK_TERBACA"
+    if [[ -n "$CEK" ]]; then
+      CEK_OK=$(grep -E '^[^A-Za-z]*CEK[[:space:]]*[0-9]+[^0-9].*✓' "$VLOG.laporan" | grep -vc '✓/✗'); CEK_X=$(grep -E '^[^A-Za-z]*CEK[[:space:]]*[0-9]+[^0-9].*✗' "$VLOG.laporan" | grep -vc '✓/✗')
+      if [[ $VERDIK == LULUS && $CEK_X -gt 0 ]]; then VERDIK=PERBAIKI; echo "⚠ TITIK CEK ✗=$CEK_X walau pemeriksa menulis LULUS → PERBAIKI" >> "$PROG"; fi
+    fi
+    if [[ $MESIN_RC == 1 && $VERDIK == LULUS ]]; then VERDIK=PERBAIKI; echo "⚠ CEK MESIN ada ✗ walau pemeriksa menulis LULUS → PERBAIKI" >> "$PROG"; fi
     [[ "$VERDIK" != PERBAIKI || $PUT -ge $PUTARAN ]] && break
     PUT=$((PUT+1))
     ATURAN_FIX="Untuk TIAP temuan: buktikan dulu (baca kode/jalankan) sebelum mengubah apa pun. Perbaiki hanya yang terbukti; yang tidak terbukti JANGAN diubah dan tulis di laporan sebagai baris 'DITOLAK: <temuan> — <bukti>'. Aturan & batas brief tetap sama."
@@ -173,6 +269,9 @@ Setiap TEMUAN wajib berbukti (kutip baris kode atau hasil eksekusi). Klaim tenta
       FSID=$SID; FRES=1
       FPROMPT="Pemeriksa independen menilai hasilmu PERBAIKI:
 $(tail -c 3000 "$VLOG.laporan")
+${MESIN_X:+
+CEK MESIN GAGAL (wajib dibuat lolos):
+$MESIN_X}
 
 $ATURAN_FIX
 $FORMAT_EKS"
@@ -187,11 +286,14 @@ $BRIEF
 
 TEMUAN PEMERIKSA INDEPENDEN (PERBAIKI):
 $(tail -c 3000 "$VLOG.laporan")
+${MESIN_X:+
+CEK MESIN GAGAL (wajib dibuat lolos):
+$MESIN_X}
 
 $ATURAN_FIX Jalankan ulang tes yang relevan sebelum melapor.
 $FORMAT_EKS"
     fi
-    echo "▶ PERBAIKAN putaran=$PUT session=$FSID" >> "$PROG"
+    echo "▶ PERBAIKAN putaran=$PUT session=$FSID" >> "$PROG"; LABEL=perbaikan$PUT
     jalankan_tahan eksekusi "$FSID" "$FRES" "$FPROMPT" "$LOG.fix$PUT"; RC=$?
     SID_AKHIR=$FSID
     [[ $RC != 0 ]] && { VERDIK="PERBAIKAN_GAGAL"; break; }
@@ -201,6 +303,13 @@ fi
 # ---------- 3. keluaran ringkas untuk Claude ----------
 SELESAI_TULIS=1; echo "■ SELESAI EXIT=$RC VERDIK=$VERDIK session=$SID_AKHIR" >> "$PROG"
 echo "SESSION=$SID_AKHIR EXIT=$RC VERDIK=$VERDIK PUTARAN_PERBAIKAN=$PUT LOG=$LOG"
+[[ $VERDIK == PERBAIKAN_GAGAL ]] && MESIN=""
+if [[ $N_CMD -gt 0 && -z "${MESIN:-}" && $RC == 0 && $TAHAP != kritik ]]; then
+  QWEN_T0=$T0 python3 ~/.claude/bin/qwen-cekmesin "$CEKF" > "$LOG.cekmesin-akhir" 2>&1; MESIN=$(cat "$LOG.cekmesin-akhir")
+fi
+[[ -n "${MESIN:-}" ]] && { echo "CEK_MESIN: $(print -r -- "$MESIN" | grep -c '✓') ✓ · $(print -r -- "$MESIN" | grep -c '✗') ✗ dari $N_CMD"; print -r -- "$MESIN" | grep -E '✗|⊘|^!!|galat' | sed 's/^/  /'
+  [[ "$MESIN" == *⊘* || "$MESIN" == *'!! cek'* ]] && echo "  (⊘/!! = butir cek di brief tak sah atau menulis — betulkan brief; bukan kesalahan Qwen)"; }
+[[ -n "$CEK" && -n "$VLOG" ]] && echo "TITIK_CEK (pemeriksa terakhir): ${CEK_OK:-0} ✓ · ${CEK_X:-0} ✗ dari $N_CEK titik"
 [[ "$SID_AKHIR" != "$SID" ]] && echo "(SESSION = sesi perbaikan terakhir, untuk revisi; sesi pelaksana awal: $SID)"
 [[ $RC == 55 ]] && echo "!! Qwen berhenti: batas waktu/tool habis — periksa perubahan parsial, lanjutkan dengan resume SESSION ini."
 [[ $RC == 53 ]] && echo "!! Qwen berhenti: batas turn habis — periksa perubahan parsial, lanjutkan dengan resume SESSION ini."
@@ -212,6 +321,7 @@ elif [[ -n "$BERUBAH" ]]; then
   print -r -- "$BERUBAH" | while IFS= read -r f; do
     if [[ -f "$f" ]] && [[ -z "$(git status --porcelain=v1 -- "$f" 2>/dev/null)" ]]; then
       echo "  · BERSIH $f (kini sama dgn HEAD: di-commit/di-revert selama sesi — cek git log, biasanya bukan Qwen)"
+    elif print -r -- "$f" | grep -Eq -- "$ARTEFAK"; then echo "  · artefak $f (cache/bytecode sampingan tes — abaikan, jangan di-commit)"
     elif [[ -n "${QWEN_AREA:-}" ]] && ! print -r -- "$f" | grep -Eq -- "$QWEN_AREA"; then echo "  ⚠ LUAR $f"
     else echo "  - $f"; fi
   done
@@ -219,6 +329,33 @@ else
   echo "FILE_BERUBAH (diukur pembungkus): tidak ada"
 fi
 rm -f "$SEBELUM" "$UNTR"
+if [[ -n "$WT" ]]; then
+  WP=$LOG.wt.patch
+  WT_ABAI=(':!vendor' ':!node_modules' ':!.env' ':(exclude,glob)**/__pycache__/**' ':(exclude,glob)**/*.pyc' ':(exclude,glob)**/.DS_Store' ':(exclude).phpunit.result.cache' ':(exclude,glob).phpunit.cache/**')
+  git -C "$WT" add -A -- . "${WT_ABAI[@]}" >/dev/null 2>&1   # index milik worktree, bukan index folder asli
+  HAPUS=0
+  if ! git -C "$WT" diff --cached --binary "$WT_BASE" -- . "${WT_ABAI[@]}" > "$WP" 2>>"$PROG"; then
+    echo "WORKTREE: ⚠ gagal membuat patch (basis ${WT_BASE[1,10]} hilang?) — worktree disimpan apa adanya"
+  elif [[ ! -s "$WP" ]]; then echo "WORKTREE: tidak ada perubahan"; HAPUS=1
+  elif git -C "$ASLI_TOP" apply --check "$WP" 2>/dev/null && git -C "$ASLI_TOP" apply "$WP"; then
+    echo "WORKTREE: $(grep -c '^diff --git' "$WP") file diterapkan ke $ASLI_TOP (patch: $WP)"; HAPUS=1
+    # basis maju (objek lepas, bukan commit di cabang mana pun): revisi berikutnya hanya membawa perubahan baru
+    NB=$(GIT_AUTHOR_NAME=qwen-exec GIT_AUTHOR_EMAIL=qwen@lokal GIT_COMMITTER_NAME=qwen-exec GIT_COMMITTER_EMAIL=qwen@lokal \
+      git -C "$WT" commit-tree "$(git -C "$WT" write-tree)" -p "$WT_BASE" -m qwen-wt-basis 2>/dev/null) \
+      && print -r -- "$NB" > "$WT.base" && git -C "$ASLI_TOP" update-ref "refs/qwen-wt/${WT:t}" "$NB"
+  else
+    echo "WORKTREE: ⚠ KONFLIK — patch tak bisa diterapkan bersih ke $ASLI_TOP (file di sana berubah). Patch: $WP"
+  fi
+  cd "$ASLI_PWD"
+  if [[ $HAPUS == 1 && $RC == 0 && "$VERDIK" =~ ^(LULUS|LULUS_MESIN|TANPA_PERUBAHAN|-)$ ]]; then
+    git -C "$ASLI_TOP" worktree remove --force "$WT" >/dev/null 2>&1 && rm -f "$WT.base" "$WT.asli" \
+      && git -C "$ASLI_TOP" update-ref -d "refs/qwen-wt/${WT:t}" 2>/dev/null
+  else
+    echo "  worktree disimpan: $WT — revisi: QWEN_WORKTREE=$WT qwen-exec eksekusi $SID_AKHIR"
+  fi
+fi
+WT=""
+[[ -f "$LOGDIR/$STAMP.metrik" ]] && { echo "METRIK:"; sed 's/^/  /' "$LOGDIR/$STAMP.metrik"; }
 if [[ -n "$VLOG" ]]; then echo "--- VERIFIKASI (Qwen independen):"; tail -c "$EKOR" "$VLOG.laporan"; fi
 echo "--- LAPORAN PELAKSANA:"
 if (( PUT > 0 )) && [[ -f "$LOG.fix$PUT.laporan" ]]; then tail -c "$EKOR" "$LOG.fix$PUT.laporan"; else tail -c "$EKOR" "$LOG.laporan"; fi
