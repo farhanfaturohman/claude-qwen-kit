@@ -45,6 +45,8 @@ patch ≤20 baris + `QWEN_AREA` diisi & tak ada file di luarnya → `VERDIK=LULU
 ±24 giliran). Butir non-`$` dinilai pemeriksa. `⊘`/`!! cek mengubah` = butir brief tak sah → betulkan brief, bukan Qwen.
 v5 otomatis: peta `git grep` kata kunci brief ditempel ke prompt (sebut nama kelas/view/rute/`kode` di brief),
 alat Qwen dipangkas (−23% token/giliran), `METRIK:` per tahap di output (+ `qwen-logs/metrik.csv`).
+`⚠ TUGAS BESAR` di output (tahap >40 giliran; biang lambat = jumlah panggilan × ±10–25 dtk) → brief berikutnya
+WAJIB dipecah per area / paralel worktree.
 **Paralel:** brief kecil yang areanya terpisah → jalankan serentak dengan `QWEN_WORKTREE=1` (worktree sendiri,
 vendor di-clone, hasil diterapkan ke folder asli di akhir; `WORKTREE: ⚠ KONFLIK` → worktree disimpan, revisi
 `QWEN_WORKTREE=<path> qwen-exec eksekusi <SESSION>`). File untracked folder asli tak ikut ke worktree.

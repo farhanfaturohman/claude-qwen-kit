@@ -11,6 +11,8 @@
 #   QWEN_PROGRESS=<file>       file progres (untuk Monitor qwen-awasi)
 #   QWEN_PERBAIKAN=baru|lanjut perbaikan otomatis di sesi baru (bawaan, ringan) atau lanjut sesi pelaksana
 #   QWEN_ULANG_JARINGAN=N      ulang otomatis bila putus jaringan (bawaan 1; jeda QWEN_JEDA_ULANG=60 dtk)
+#   QWEN_LOGDIR=<dir>          folder log (bawaan ~/.claude/qwen-logs; uji.sh memakai folder sementara)
+#   QWEN_BESAR=N               ambang panggilan per tahap untuk peringatan ⚠ TUGAS BESAR (bawaan 40)
 #   QWEN_PETA=0                matikan peta otomatis (git grep kata kunci brief → file:baris di prompt)
 #   QWEN_ALAT=penuh            jangan pangkas alat Qwen (bawaan: hanya baca/cari/edit/tulis/shell)
 #   QWEN_WORKTREE=1            kerja di git worktree terpisah (paralel aman), hasil diterapkan ke folder asli
@@ -31,7 +33,7 @@ BRIEF="$(cat)"
 [[ -z "$BRIEF" ]] && { echo "brief kosong (kirim lewat stdin)"; exit 2; }
 SID="${RESUME:-$(uuid_baru)}"
 STAMP=$(date +%Y%m%d-%H%M%S)-${SID[1,8]}
-LOGDIR=~/.claude/qwen-logs
+LOGDIR=${QWEN_LOGDIR:-~/.claude/qwen-logs}; mkdir -p "$LOGDIR"
 LOG=$LOGDIR/$STAMP.jsonl
 CEKF=$LOG.cek
 PROG="${QWEN_PROGRESS:-$LOGDIR/$STAMP.progress}"
@@ -65,11 +67,11 @@ KENDALA: hal yang belum selesai/ragu, atau '-'"
 [[ -n "$CEK" ]] && FORMAT_EKS="$FORMAT_EKS
 TITIK_CEK: satu baris per titik cek brief → 'CEK n: ✓ atau ✗ — bukti singkat (perintah+hasil / path:baris)'"
 if [[ "$TAHAP" == kritik ]]; then
-  PERAN="TAHAP: KRITIK READ-ONLY. Hanya baca dan nilai. DILARANG mengubah, membuat, atau menghapus file apa pun dan dilarang menjalankan perintah yang mengubah keadaan."
+  PERAN="TAHAP: KRITIK READ-ONLY. Hanya baca dan nilai. DILARANG mengubah, membuat, atau menghapus file apa pun dan dilarang menjalankan perintah yang mengubah keadaan. HEMAT PANGGILAN (tiap panggilan model ±10–25 dtk): gabungkan beberapa perintah baca/cek dalam SATU run_shell_command (mis. grep a; grep b; php -l x); file >300 baris baca dengan offset/limit ±100 baris di sekitar baris peta/grep, bukan utuh."
   LAPOR="LAPORAN AKHIR (ringkas, maks ±25 baris; rincian panjang tulis ke berkas lalu rujuk path-nya): RISIKO, KEKURANGAN, USULAN KOREKSI, PERLU KEPUTUSAN PENGGUNA. Sertakan path:baris bila relevan."
 else
   PERAN="TAHAP: EKSEKUSI. Kerjakan langsung sesuai brief. Jangan memanggil agen/Codex/Claude/Qwen lain dan jangan mendelegasikan ulang. Hasilmu akan diperiksa pemeriksa independen: jalankan sendiri tes yang relevan sebelum melapor.
-KERJA CEPAT: (a) bila brief menyebut file/path sasaran, langsung buka itu dan jangan menjelajah modul lain (patokan ≤8 baca/cari sebelum perubahan pertama; butuh lebih berarti brief kurang jelas → kerjakan yang pasti, sisanya tulis di KENDALA). (b) Kerjakan & SIMPAN bertahap per langkah/titik cek, jangan menumpuk sampai akhir — batas sesi ±${QWEN_MAX_WALL:-20m}; bila habis, hasil parsial tetap terpakai. (c) Jangan membaca ulang file yang sudah dibaca.${CEK:+ (d) Brief memuat TITIK CEK: itu definisi selesai — penuhi semuanya dan buktikan satu per satu.}"
+KERJA CEPAT: (a) bila brief menyebut file/path sasaran, langsung buka itu dan jangan menjelajah modul lain (patokan ≤8 baca/cari sebelum perubahan pertama; butuh lebih berarti brief kurang jelas → kerjakan yang pasti, sisanya tulis di KENDALA). (b) Kerjakan & SIMPAN bertahap per langkah/titik cek, jangan menumpuk sampai akhir — batas sesi ±${QWEN_MAX_WALL:-20m}; bila habis, hasil parsial tetap terpakai. (c) Jangan membaca ulang file yang sudah dibaca. (e) HEMAT PANGGILAN (tiap panggilan model ±10–25 dtk): gabungkan beberapa perintah baca/cek dalam SATU run_shell_command (mis. grep a; grep b; php -l x); lakukan beberapa edit yang saling lepas dalam SATU respons; file >300 baris baca dengan offset/limit ±100 baris di sekitar baris peta/grep, bukan utuh.${CEK:+ (d) Brief memuat TITIK CEK: itu definisi selesai — penuhi semuanya dan buktikan satu per satu.}"
   LAPOR="$FORMAT_EKS
 Jika brief bermasalah atau butuh keputusan pengguna/melebihi batas: BERHENTI tanpa mengubah apa pun dan laporkan di KENDALA."
 fi
@@ -101,7 +103,10 @@ jalankan() {
     | python3 ~/.claude/bin/qwen-saring.py "$5" "$PROG" > "$5.laporan"
   local rc=${pipestatus[1]} mt
   mt=$(QWEN_PROYEK=${ASLI_PWD:t} python3 ~/.claude/bin/qwen-metrik "$5" "${LABEL:-$1}" 2>/dev/null)
-  [[ -n "$mt" ]] && { echo "· METRIK $mt" >> "$PROG"; print -r -- "$mt" >> "$LOGDIR/$STAMP.metrik"; }
+  [[ -n "$mt" ]] && { echo "· METRIK $mt" >> "$PROG"; print -r -- "$mt" >> "$LOGDIR/$STAMP.metrik"
+    if [[ "$mt" =~ ' ([0-9]+) giliran' ]] && (( match[1] > ${QWEN_BESAR:-40} )); then
+      print -r -- "⚠ TUGAS BESAR: tahap ${LABEL:-$1} memakai ${match[1]} giliran (>${QWEN_BESAR:-40}) — brief berikutnya pecah per area (≤5 file) / jalankan paralel QWEN_WORKTREE=1" | tee -a "$PROG" >> "$LOGDIR/$STAMP.besar"
+    fi; }
   return $rc
 }
 JARINGAN='Connection error|ENOTFOUND|EHOSTUNREACH|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|terminated|No stream activity|fetch failed'
@@ -303,6 +308,7 @@ fi
 # ---------- 3. keluaran ringkas untuk Claude ----------
 SELESAI_TULIS=1; echo "■ SELESAI EXIT=$RC VERDIK=$VERDIK session=$SID_AKHIR" >> "$PROG"
 echo "SESSION=$SID_AKHIR EXIT=$RC VERDIK=$VERDIK PUTARAN_PERBAIKAN=$PUT LOG=$LOG"
+[[ -f "$LOGDIR/$STAMP.besar" ]] && cat "$LOGDIR/$STAMP.besar"
 [[ $VERDIK == PERBAIKAN_GAGAL ]] && MESIN=""
 if [[ $N_CMD -gt 0 && -z "${MESIN:-}" && $RC == 0 && $TAHAP != kritik ]]; then
   QWEN_T0=$T0 python3 ~/.claude/bin/qwen-cekmesin "$CEKF" > "$LOG.cekmesin-akhir" 2>&1; MESIN=$(cat "$LOG.cekmesin-akhir")

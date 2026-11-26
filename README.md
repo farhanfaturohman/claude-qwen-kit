@@ -85,6 +85,12 @@ diberi peringatan `!!` bila berubah.
   Token per giliran turun sekitar 23% (terukur 16,2rb → 12,5rb). `QWEN_ALAT=penuh` mengembalikannya.
 - **Metrik** (`bin/qwen-metrik`): baris `METRIK:` per tahap di keluaran berisi menit, giliran, alat, alat
   sebelum tulis pertama, dan token. Riwayatnya ada di `~/.claude/qwen-logs/metrik.csv`.
+- **Hemat panggilan**: penyebab lambat adalah jumlah panggilan model (masing-masing ±10–25 detik), bukan
+  besar file. Pelaksana diminta menggabungkan perintah baca dalam satu shell, membuat beberapa edit
+  dalam satu respons, dan membaca file besar dengan offset. Tahap yang melewati `QWEN_BESAR` (bawaan 40)
+  giliran memunculkan `⚠ TUGAS BESAR` di keluaran, sebagai tanda brief berikutnya perlu dipecah.
+- **Log uji terpisah**: `QWEN_LOGDIR` (dipakai `uji.sh`), jadi log Qwen palsu tidak mencemari
+  `~/.claude/qwen-logs`.
 - **Mode worktree** `QWEN_WORKTREE=1`: Qwen bekerja di git worktree terpisah. Basisnya working tree saat ini
   (termasuk perubahan yang belum di-commit), vendor di-clone, dan `.env` di-symlink. Di akhir, patch
   diterapkan ke folder asli. Kalau konflik, folder asli tidak disentuh dan worktree disimpan untuk revisi

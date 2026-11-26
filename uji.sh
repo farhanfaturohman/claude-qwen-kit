@@ -5,6 +5,8 @@ set -uo pipefail
 export QWEN_UJI=1   # metrik qwen palsu tak dicatat ke metrik.csv
 QE="$HOME/.claude/bin/qwen-exec"
 T=$(mktemp -d)
+export QWEN_LOGDIR="$T/logs"   # log qwen palsu tak mencemari ~/.claude/qwen-logs
+ASLI_LOG_N=$(ls ~/.claude/qwen-logs 2>/dev/null | wc -l)
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/repo"
 cat > "$T/bin/qwen" <<'EOF'
@@ -109,7 +111,7 @@ printf 'ubah f\n\nTITIK CEK:\n1. $ grep -q fixed f\n2. isi f wajar\n' | q6 o7
 cek "v5 cek mesin ✗ memaksa perbaikan (walau pemeriksa LULUS) → LULUS" "grep -q 'VERDIK=LULUS PUTARAN_PERBAIKAN=1' '$T/o7' && j6 | grep '^PERBAIKAN' | grep -q 'CEK MESIN GAGAL'"
 printf 'ubah f\n' | QWEN_WORKTREE=1 QWEN_VERIFIKASI=0 q6 o8
 wt=$(sed -n 's/^· WORKTREE \([^ ]*\) .*/\1/p' "$T/p6")
-cek "v5 worktree: Qwen di worktree, hasil diterapkan ke folder asli, worktree dibersihkan" "grep -q 'WORKTREE: 1 file diterapkan' '$T/o8' && grep -q baris f && [ -n '$wt' ] && [ ! -d '$wt' ] && j6 | grep -q '| $wt'"
+cek "v5 worktree: Qwen di worktree, hasil diterapkan ke folder asli, worktree dibersihkan" "grep -q 'WORKTREE: 1 file diterapkan' '$T/o8' && grep -q baris f && [ -n '$wt' ] && [ ! -d '$wt' ] && j6 | grep -q \"/\$(basename '$wt')\""
 printf 'ubah f\n' | KONFLIK6="$PWD/f" QWEN_WORKTREE=1 QWEN_VERIFIKASI=0 q6 o9
 wt=$(sed -n 's/^· WORKTREE \([^ ]*\) .*/\1/p' "$T/p6")
 cek "v5 worktree konflik: tak menimpa folder asli, worktree disimpan" "grep -q 'KONFLIK' '$T/o9' && grep -qx lain f && [ -d '$wt' ] && grep -q 'worktree disimpan' '$T/o9'"
@@ -144,6 +146,11 @@ R=$(mktemp -d); ( cd "$R" && git init -q && echo AWAL > f.txt && echo AWAL > 'é
 cek "review3: index.lock + path non-ASCII → kerja pengguna dipulihkan utuh; grep nama fungsi tak ditolak" "grep -qx 'KERJA PENGGUNA' '$R/f.txt' && grep -qx 'KERJA PENGGUNA' '$R/é.txt' && grep -q 'CEK 2: ✓' '$R/o' && grep -q 'rc=4' '$R/o'"
 rm -rf "$R"
 
+printf 'ubah f\n' | QWEN_BESAR=0 QWEN_VERIFIKASI=0 q6 o18
+cek "tugas besar: giliran > QWEN_BESAR → ⚠ TUGAS BESAR di keluaran" "grep -q '⚠ TUGAS BESAR: tahap pelaksana' '$T/o18'"
+cek "aturan hemat panggilan masuk prompt pelaksana" "j6 | grep '^PELAKSANA' | grep -q 'HEMAT PANGGILAN'"
+git checkout -q f
+
 J="$HOME/.claude/bin/jaga-db"
 jaga() { python3 -c 'import json,sys;print(json.dumps({"tool_input":{"command":sys.argv[1]}}))' "$1" | "$J" 2>/dev/null; echo $?; }
 tolak=0; for x in "php artisan migrate:fre""sh" "cd x && php artisan migrate:roll""back" "php artisan db:wi""pe" "php artisan migr""ate" \
@@ -154,4 +161,5 @@ cek "jaga-db menolak perintah DB berbahaya & meloloskan yang aman" "[ $tolak = 0
 
 out=$(echo "{\"workspace\":{\"current_dir\":\"$T/repo\"}}" | "$HOME/.claude/bin/qwen-status")
 cek "qwen-status jalan: $out" "[ -n \"\$out\" ]"
+cek "log uji terpisah: ~/.claude/qwen-logs tak bertambah" "[ \$(ls ~/.claude/qwen-logs | wc -l) -le \$((ASLI_LOG_N+2)) ]"
 exit $gagal
